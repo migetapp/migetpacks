@@ -1,0 +1,201 @@
+---
+title: "Python"
+description: "Build and deploy Python applications with pip or uv, including Django and FastAPI support."
+---
+
+## Detection
+
+migetpacks detects Python when any of these files are present in your project root:
+
+- `requirements.txt`
+- `setup.py`
+- `Pipfile`
+- `pyproject.toml`
+
+## Version Detection
+
+Python version is resolved in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `PYTHON_VERSION` env var | `PYTHON_VERSION=3.12` |
+| 2 | `.python-version` file | `3.12.8` |
+| 3 | `runtime.txt` file | `python-3.12.8` |
+| 4 | `requires-python` in `uv.lock` | `requires-python = ">=3.13"` |
+| 5 | `requires-python` in `pyproject.toml` | `requires-python = ">=3.12"` |
+| 6 | Default | `3.12.8` |
+
+Version constraints are normalized for Docker compatibility (e.g., `>=3.13` becomes `3.13`).
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile with virtualenv isolation:
+
+### Standard pip/pipenv/poetry
+
+```dockerfile
+# Builder stage
+FROM python:3.12 AS builder
+WORKDIR /build
+
+# Layer 1: Copy dependency files
+COPY requirements.txt* pyproject.toml* poetry.lock* Pipfile* ./
+ENV PYTHONUNBUFFERED=1
+
+# Layer 2: Create virtualenv
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip
+
+# Layer 3: Install dependencies (CACHED when only source code changes)
+RUN . /opt/venv/bin/activate \
+    && pip install -r requirements.txt
+
+# Layer 4: Copy source code
+COPY . .
+
+# Layer 5: Collectstatic and cleanup
+RUN . /opt/venv/bin/activate \
+    && python manage.py collectstatic --noinput \
+    && rm -rf .git test tests __pycache__ .pytest_cache .coverage htmlcov
+
+# Runtime stage
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /build /app
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+```
+
+### uv Projects
+
+When `uv.lock` is present, migetpacks uses the `uv` package manager natively:
+
+```dockerfile
+# Builder stage
+FROM python:3.13 AS builder
+WORKDIR /build
+
+COPY requirements.txt* pyproject.toml* uv.lock* ./
+ENV PYTHONUNBUFFERED=1
+
+# Install uv and sync dependencies
+RUN pip install uv \
+    && uv venv /app/.venv \
+    && UV_PROJECT_ENVIRONMENT=/app/.venv uv sync --locked --no-dev
+
+COPY . .
+
+# Runtime stage
+FROM python:3.13-slim
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /build /app
+ENV PATH="/app/.venv/bin:$PATH"
+```
+
+### Package Manager Detection
+
+| File | Package Manager |
+|------|-----------------|
+| `uv.lock` | uv (native) |
+| `requirements.txt` | pip |
+| `Pipfile` / `Pipfile.lock` | pipenv |
+| `poetry.lock` | poetry |
+| `pyproject.toml` (no lock) | pip |
+
+### Dependency Detection
+
+migetpacks automatically detects database and XML libraries from your dependency files and installs the required system packages:
+
+| Python Package | System Package |
+|---------------|---------------|
+| `psycopg`, `asyncpg`, `aiopg` | `libpq5` |
+| `mysqlclient`, `pymysql`, `aiomysql` | `libmariadb3` |
+| `aiosqlite` | `libsqlite3-0` |
+| `lxml` | `libxml2`, `libxslt1.1` |
+
+### Runtime Cleanup
+
+The following are removed from the final image:
+
+- `.git/`, `.github/`
+- `test/`, `tests/`
+- `__pycache__/`, `.pytest_cache/`
+- `.coverage`, `htmlcov/`
+
+### Django Support
+
+If `manage.py` is detected, `python manage.py collectstatic --noinput` is automatically run during the build.
+
+## Run Command
+
+The default run command is determined in this order:
+
+| Priority | Source | Command |
+|----------|--------|---------|
+| 1 | `RUN_COMMAND` env var | User-specified |
+| 2 | `web:` in Procfile | From Procfile |
+| 3 | Django + gunicorn | `gunicorn project.wsgi:application --bind 0.0.0.0:$PORT` |
+| 4 | Django + uvicorn | `uvicorn project.asgi:application --host 0.0.0.0 --port $PORT` |
+| 5 | gunicorn detected | `gunicorn app:app --bind 0.0.0.0:$PORT` |
+| 6 | uvicorn detected | `uvicorn main:app --host 0.0.0.0 --port $PORT` |
+| 7 | `manage.py` exists | `python manage.py runserver 0.0.0.0:$PORT` |
+| 8 | Default | `python app.py` or `python main.py` |
+
+## Caching
+
+### Docker Layer Caching
+
+Dependencies are installed in a separate layer using a virtualenv. `pip install` is only re-run when dependency files change.
+
+### BuildKit Cache Mounts
+
+When `BUILD_CACHE_DIR` is configured, BuildKit cache mounts are used:
+
+| Cache Path | Contents |
+|-----------|----------|
+| `/cache/pip` | pip wheel cache |
+| `/cache/uv` | uv package cache |
+
+### Registry Cache
+
+Use `CACHE_IMAGE` to push/pull BuildKit inline cache layers to a registry for cross-build caching.
+
+## DHI Support
+
+<Check>Python is fully supported with Docker Hardened Images.</Check>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/python:{version}-dev` |
+| Runtime | `dhi.io/python:{version}` |
+
+The `-dev` variant includes a shell and build tools. The runtime image is distroless with no shell, providing a minimal attack surface.
+
+<Note>
+The virtualenv is copied from the builder stage to the distroless runtime, ensuring all installed packages are available without needing pip in the runtime image.
+</Note>
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-python-app:latest \
+  miget/migetpacks:latest
+```
+
+### With Custom Options
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/app:v1 \
+  -e PYTHON_VERSION=3.13 \
+  -e RUN_COMMAND="gunicorn myapp.wsgi:application --bind 0.0.0.0:5000" \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```

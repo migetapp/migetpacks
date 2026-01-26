@@ -1,0 +1,121 @@
+---
+title: "Environment Variables"
+description: "Complete reference for all configuration options"
+---
+
+## Builder Configuration
+
+These environment variables control how migetpacks builds your application.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SOURCE_DIR` | No | `/workspace/source` | Source code directory |
+| `OUTPUT_IMAGE` | Yes | - | Target image name (e.g., `registry.io/app:tag`) |
+| `LANGUAGE` | No | auto-detected | Programming language override |
+| `RUN_COMMAND` | No | from Procfile/default | Command to run the application |
+| `PORT` | No | `5000` | Port the application listens on |
+| `ARCH` | No | `x86_64` | Target architecture (`x86_64`, `arm64`) |
+| `PROJECT_PATH` | No | - | Subdirectory within `SOURCE_DIR` for monorepo support |
+| `DOCKERFILE_PATH` | No | - | Custom Dockerfile path (relative to `PROJECT_PATH` or absolute) |
+| `COMPOSE_FILE` | No | - | Custom compose file path (auto-detects `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`) |
+| `BUILDPACKS` | No | auto-detected | Explicit buildpack order (e.g., `ruby,python,nodejs` - first is primary) |
+| `RESULT_FILE` | No | - | Path to write build results JSON (for Shipwright post-build steps) |
+| `STORAGE_DRIVER` | No | `overlay2` | Docker storage driver override (e.g., `fuse-overlayfs` for nested DinD) |
+
+## Caching Options
+
+These variables configure build caching for faster subsequent builds.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CACHE_IMAGE` | No | - | Registry image for BuildKit cache |
+| `CACHE_REGISTRY_INSECURE` | No | `false` | Set to `true` for HTTP registries (e.g., internal cache registry) |
+| `NO_CACHE` | No | `false` | Force fresh build (`--no-cache`), skips cache-from but still exports to cache-to |
+| `CACHE_MODE` | No | `min` | BuildKit cache export mode: `min` (final layer only, smaller) or `max` (all layers, better hits) |
+| `CACHE_FROM` | No | - | Additional read-only cache sources (comma-separated registry refs, skipped when `NO_CACHE=true`) |
+| `REGISTRY_MIRROR` | No | - | Docker registry mirror URL (e.g., `https://registry.example.io/mirror`) |
+| `BUILD_CACHE_DIR` | No | - | Shared cache directory for package managers (mount RWX volume here) |
+
+## Docker Hardened Images
+
+These variables enable Docker Hardened Images for secure, minimal containers.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `USE_DHI` | No | `false` | Use Docker Hardened Images (dhi.io) for secure, minimal runtime containers |
+| `DHI_USERNAME` | No | - | DHI registry username (alternative to mounting docker config) |
+| `DHI_PASSWORD` | No | - | DHI registry password/token |
+| `DHI_MIRROR` | No | - | DHI registry mirror URL (e.g., `https://registry.example.io/dhi-io`) |
+
+## Custom Environment Variables
+
+Any environment variable passed to migetpacks that is **not** in the known builder variables list is automatically injected into the generated Dockerfile as an `ENV` statement. This allows you to configure your application's build environment without modifying any configuration files.
+
+### How It Works
+
+1. You pass an environment variable to the migetpacks container (e.g., `-e NODE_OPTIONS="--max-old-space-size=4096"`)
+2. The builder checks whether it matches any known builder variable pattern
+3. If it does not match, it is added to the generated Dockerfile as an `ENV` instruction
+4. The variable becomes available during both the build and runtime stages
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -e OUTPUT_IMAGE=my-app:latest \
+  -e NODE_OPTIONS="--max-old-space-size=4096" \
+  -e VITE_API_URL="https://api.example.com" \
+  miget/migetpacks:latest
+```
+
+The generated Dockerfile will include:
+
+```dockerfile
+# Custom build environment variables
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV VITE_API_URL="https://api.example.com"
+```
+
+### Common Use Cases
+
+<AccordionGroup>
+  <Accordion title="Node.js heap size">
+    Increase the V8 heap size for large builds that run out of memory:
+    ```bash
+    -e NODE_OPTIONS="--max-old-space-size=4096"
+    ```
+  </Accordion>
+
+  <Accordion title="Frontend build-time variables">
+    Inject variables consumed by Vite, Next.js, or similar frameworks during the build:
+    ```bash
+    -e VITE_API_URL="https://api.example.com"
+    -e NEXT_PUBLIC_ANALYTICS_ID="UA-123456"
+    ```
+  </Accordion>
+
+  <Accordion title="Rails credentials">
+    Provide the master key so Rails can decrypt credentials during asset precompilation:
+    ```bash
+    -e RAILS_MASTER_KEY="abc123def456"
+    ```
+  </Accordion>
+
+  <Accordion title="Custom build flags">
+    Pass arbitrary flags to your build tooling:
+    ```bash
+    -e CARGO_BUILD_JOBS="4"
+    -e MIX_ENV="prod"
+    -e BUNDLE_DEPLOYMENT="true"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Filtered Variables
+
+The following categories of variables are **never** passed through to the Dockerfile:
+
+- **Builder config**: `SOURCE_DIR`, `OUTPUT_IMAGE`, `LANGUAGE`, `BUILD_COMMAND`, `RUN_COMMAND`, `PORT`, `ARCH`, `CACHE_IMAGE`, `NO_CACHE`, `CACHE_MODE`, `CACHE_FROM`, `BUILDPACKS`, `USE_DHI`, `REGISTRY_MIRROR`, `RESULT_FILE`, `STORAGE_DRIVER`, etc.
+- **Language-specific**: Go build flags, Scala/sbt options, Clojure/Leiningen settings
+- **Credentials**: `AWS_*` variables (never exposed in images)
+- **Docker/system**: `DOCKER_HOST`, `DOCKER_CONFIG`, `DOCKER_BUILDKIT`, etc.
+- **Shell/system**: `PATH`, `HOME`, `PWD`, `TERM`, `SHELL`, `USER`, `HOSTNAME`, `LANG`, `LC_*`, `XDG_*`, `SSH_*`, etc.

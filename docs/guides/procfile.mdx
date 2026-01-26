@@ -1,0 +1,179 @@
+---
+title: "Procfile"
+description: "Define process types with Procfile for web servers, workers, and other processes."
+---
+
+## Overview
+
+migetpacks supports Procfiles for defining process types in your application. A Procfile declares the commands used to run different process types (web server, background workers, scheduled tasks, etc.).
+
+## Procfile Format
+
+A Procfile is a plain text file named `Procfile` (no extension) in the project root. Each line declares a process type:
+
+```text
+<process_type>: <command>
+```
+
+### Example Procfile
+
+```text
+web: bundle exec puma -C config/puma.rb
+worker: bundle exec sidekiq
+release: bundle exec rails db:migrate
+clock: bundle exec clockwork clock.rb
+```
+
+## Process Priority
+
+migetpacks determines the main process command using the following priority order:
+
+<Steps>
+  <Step title="RUN_COMMAND environment variable">
+    If set, this always takes precedence over any Procfile entry.
+    ```bash
+    -e RUN_COMMAND="node server.js"
+    ```
+  </Step>
+  <Step title="web: from Procfile">
+    The `web` process type is the standard entry point for HTTP-serving applications.
+  </Step>
+  <Step title="First process in Procfile">
+    If no `web:` entry exists, the first process declared in the Procfile is used.
+  </Step>
+  <Step title="Language-specific default">
+    If no Procfile exists and `RUN_COMMAND` is not set, a language-specific default is used (e.g., `node server.js`, `python app.py`).
+  </Step>
+</Steps>
+
+## Language Examples
+
+<Tabs>
+  <Tab title="Ruby / Rails">
+    ```text
+    web: bundle exec puma -C config/puma.rb
+    worker: bundle exec sidekiq
+    release: bundle exec rails db:migrate
+    ```
+  </Tab>
+  <Tab title="Node.js">
+    ```text
+    web: node server.js
+    worker: node worker.js
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```text
+    web: gunicorn app:app --bind 0.0.0.0:5000
+    worker: celery -A tasks worker --loglevel=info
+    ```
+  </Tab>
+  <Tab title="Go">
+    ```text
+    web: ./bin/app serve
+    worker: ./bin/app worker
+    ```
+  </Tab>
+  <Tab title="Java">
+    ```text
+    web: java -jar target/app.jar
+    worker: java -jar target/worker.jar
+    ```
+  </Tab>
+</Tabs>
+
+## Result JSON
+
+Process information from the Procfile is recorded in the build result JSON (when `RESULT_FILE` is set):
+
+```json
+{
+  "status": "success",
+  "processes": {
+    "web": "bundle exec puma -C config/puma.rb",
+    "release": "bundle exec rails db:migrate",
+    "workers": [
+      {"name": "sidekiq", "command": "bundle exec sidekiq"},
+      {"name": "clock", "command": "bundle exec clockwork clock.rb"}
+    ]
+  }
+}
+```
+
+### Process Classification
+
+| Process Type | Classification | Description |
+|-------------|---------------|-------------|
+| `web` | Main process | HTTP-serving entry point |
+| `release` | Release script | Run during deployment (e.g., migrations) |
+| Any other | Worker | Background processes |
+
+## Overriding with RUN_COMMAND
+
+You can override the Procfile's web process without modifying the file:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e RUN_COMMAND="bundle exec puma -p 5000 -w 4" \
+  miget/migetpacks:latest
+```
+
+<Note>
+`RUN_COMMAND` only overrides the main container command (equivalent to Docker `CMD`). Worker processes from the Procfile are still recorded in the result JSON for deployment systems that support multiple process types.
+</Note>
+
+## DHI Considerations
+
+<Warning>
+When building with `USE_DHI=true`, Procfile commands are adjusted for distroless containers:
+
+- Shell-style commands are converted to exec format
+- Ruby shebang scripts (e.g., `./bin/rails`) are prefixed with `ruby` (e.g., `ruby bin/rails`)
+- Shell variable expansions like `${PORT:-5000}` are pre-expanded to literal values
+</Warning>
+
+## Port Configuration
+
+The `PORT` environment variable (default: `5000`) is exposed in the container. Your Procfile command should bind to this port:
+
+<CodeGroup>
+```bash Using PORT variable
+web: bundle exec puma -p $PORT
+```
+
+```bash Hardcoded port
+web: bundle exec puma -p 5000
+```
+
+```bash Custom port
+# Set PORT=8080 when running migetpacks
+web: node server.js --port $PORT
+```
+</CodeGroup>
+
+## app.json Integration
+
+If your project includes an `app.json` file, process formation (replicas) can be configured alongside the Procfile:
+
+```json
+{
+  "formation": {
+    "web": {"quantity": 2, "size": "standard-1x"},
+    "worker": {"quantity": 1}
+  }
+}
+```
+
+This formation data is included in the result JSON for deployment systems:
+
+```json
+{
+  "formation": [
+    {"name": "web", "quantity": 2, "size": "standard-1x"},
+    {"name": "worker", "quantity": 1, "size": null}
+  ]
+}
+```

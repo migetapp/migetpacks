@@ -1,0 +1,252 @@
+---
+title: "Shipwright"
+description: "ClusterBuildStrategy for Kubernetes-native builds"
+---
+
+## What is Shipwright?
+
+[Shipwright](https://shipwright.io) is a Kubernetes-native build framework that provides a declarative API for building container images. It abstracts away the complexity of container builds by defining **BuildStrategies** that encapsulate build tools and processes.
+
+migetpacks integrates with Shipwright as a **ClusterBuildStrategy**, allowing you to build application containers directly from source code using Kubernetes-native resources.
+
+## ClusterBuildStrategy
+
+The ClusterBuildStrategy defines how migetpacks runs inside the cluster. It specifies the builder image, volumes, and parameters available to builds.
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: ClusterBuildStrategy
+metadata:
+  name: migetpacks
+spec:
+  volumes:
+    - name: results
+      emptyDir: {}
+    - name: build-cache
+      persistentVolumeClaim:
+        claimName: build-cache  # RWX PVC shared across builds
+  steps:
+    - name: build
+      image: miget/migetpacks:latest
+      securityContext:
+        privileged: true  # Required for Docker-in-Docker
+      volumeMounts:
+        - name: results
+          mountPath: /workspace/output
+        - name: build-cache
+          mountPath: /cache
+      env:
+        - name: SOURCE_DIR
+          value: $(params.shp-source-root)
+        - name: OUTPUT_IMAGE
+          value: $(params.shp-output-image)
+        - name: RESULT_FILE
+          value: /workspace/output/build-result.json
+        - name: BUILD_CACHE_DIR
+          value: /cache
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+```
+
+<Note>
+The `privileged: true` security context is required because migetpacks uses Docker-in-Docker (DinD) to build container images.
+</Note>
+
+## Volumes
+
+migetpacks uses several volume types in Shipwright builds:
+
+| Volume | Type | Purpose |
+|--------|------|---------|
+| Source | Shipwright-managed | Source code from Git repository |
+| Results | `emptyDir` | Build result JSON for post-build steps |
+| Build Cache | PVC (RWX) | Shared package manager cache across builds |
+
+## Environment Variables
+
+Pass environment variables to customize the build behavior. These can be set directly in the BuildStrategy or passed through the Build resource.
+
+```yaml
+env:
+  - name: LANGUAGE
+    value: ruby
+  - name: PORT
+    value: "3000"
+  - name: USE_DHI
+    value: "true"
+  - name: REGISTRY_MIRROR
+    value: https://registry.example.io/mirror
+  - name: CACHE_IMAGE
+    value: registry.io/myapp:cache
+```
+
+Any environment variable not in the known builder variables list is automatically injected into the generated Dockerfile as an `ENV` statement. This is useful for passing build-time configuration like `NODE_OPTIONS` or `RAILS_MASTER_KEY`.
+
+## RESULT_FILE for Post-Build Steps
+
+When `RESULT_FILE` is set, migetpacks writes a JSON file containing build results. This enables post-build steps (like deployment notifications) to access build metadata.
+
+The builder always exits with code 0 to ensure post-build steps execute. Check the `status` field in the result JSON to determine if the build succeeded or failed.
+
+```yaml
+volumes:
+  - name: results
+    emptyDir: {}
+steps:
+  - name: build
+    image: miget/migetpacks:latest
+    volumeMounts:
+      - name: results
+        mountPath: /workspace/output
+    env:
+      - name: RESULT_FILE
+        value: /workspace/output/build-result.json
+
+  - name: notify
+    image: your-rabbitmq-publisher:latest
+    volumeMounts:
+      - name: results
+        mountPath: /workspace/output
+    # Reads /workspace/output/build-result.json and publishes to RabbitMQ
+```
+
+## Build Resource
+
+The Build resource defines what to build and where to push the result.
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: Build
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  source:
+    type: Git
+    git:
+      url: https://github.com/your-org/your-app.git
+      revision: main
+    contextDir: .  # Or a subdirectory for monorepos
+  strategy:
+    name: migetpacks
+    kind: ClusterBuildStrategy
+  output:
+    image: registry.io/your-org/your-app:latest
+    credentials:
+      name: registry-credentials  # Secret with .dockerconfigjson
+  env:
+    - name: USE_DHI
+      value: "true"
+    - name: PORT
+      value: "3000"
+  timeout: 10m
+```
+
+## BuildRun Resource
+
+A BuildRun triggers an actual build execution.
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  name: my-app-run-1
+  namespace: default
+spec:
+  build:
+    name: my-app
+  env:
+    - name: NO_CACHE
+      value: "true"  # Force fresh build for this run
+  serviceAccount:
+    name: build-sa
+  timeout: 15m
+```
+
+You can also create a BuildRun that overrides the output image:
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  generateName: my-app-run-
+  namespace: default
+spec:
+  build:
+    name: my-app
+  output:
+    image: registry.io/your-org/your-app:$(git-sha)
+    credentials:
+      name: registry-credentials
+```
+
+## Full Example with Cache and Results
+
+This complete example shows a ClusterBuildStrategy with build caching, registry mirror, and a post-build notification step:
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: ClusterBuildStrategy
+metadata:
+  name: migetpacks-full
+spec:
+  volumes:
+    - name: results
+      emptyDir: {}
+    - name: build-cache
+      persistentVolumeClaim:
+        claimName: migetpacks-cache  # RWX PVC
+  steps:
+    - name: build
+      image: miget/migetpacks:latest
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: results
+          mountPath: /workspace/output
+        - name: build-cache
+          mountPath: /cache
+      env:
+        - name: SOURCE_DIR
+          value: $(params.shp-source-root)
+        - name: OUTPUT_IMAGE
+          value: $(params.shp-output-image)
+        - name: RESULT_FILE
+          value: /workspace/output/build-result.json
+        - name: BUILD_CACHE_DIR
+          value: /cache
+        - name: REGISTRY_MIRROR
+          value: https://registry.example.io/mirror
+        - name: USE_DHI
+          value: "true"
+        - name: CACHE_IMAGE
+          value: $(params.shp-output-image)-cache
+        - name: CACHE_MODE
+          value: max
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+
+    - name: notify
+      image: your-notification-service:latest
+      volumeMounts:
+        - name: results
+          mountPath: /workspace/output
+      env:
+        - name: RESULT_PATH
+          value: /workspace/output/build-result.json
+        - name: RABBITMQ_URL
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-credentials
+              key: url
+```

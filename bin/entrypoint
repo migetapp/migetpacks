@@ -1,0 +1,242 @@
+#!/bin/bash
+# migetpacks entrypoint
+# Starts supervisord (dockerd, etc.) then runs the build
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+header() {
+  echo ""
+  echo -e "${BLUE}-----> $1${NC}"
+}
+
+info() {
+  echo "       $1"
+}
+
+success() {
+  echo -e "${GREEN}-----> $1${NC}"
+}
+
+error() {
+  echo -e "${RED}-----> ERROR: $1${NC}" >&2
+}
+
+header "Prerequisites"
+
+# Detect host interface MTU and configure Docker daemon to match
+# GitHub Actions (and other overlay networks) often have MTU < 1500;
+# DinD defaults to 1500 which causes packet drops and timeouts
+HOST_MTU=""
+DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)
+if [ -n "$DEFAULT_IFACE" ]; then
+  HOST_MTU=$(cat "/sys/class/net/$DEFAULT_IFACE/mtu" 2>/dev/null)
+fi
+# Subtract 50 bytes for overlay/VXLAN encapsulation overhead
+# (GitHub Actions/Azure report 1500 on eth0 but the path MTU is ~1450)
+DOCKER_MTU="${HOST_MTU:-1500}"
+DOCKER_MTU=$((DOCKER_MTU - 50))
+info "Configuring Docker daemon MTU: $DOCKER_MTU (host interface: ${DEFAULT_IFACE:-unknown})"
+jq --argjson mtu "$DOCKER_MTU" '. + {"mtu": $mtu}' \
+  /etc/docker/daemon.json > /tmp/daemon.json && mv /tmp/daemon.json /etc/docker/daemon.json
+
+# Configure registry mirror if set (e.g., https://mirror.gcr.io)
+if [ -n "$REGISTRY_MIRROR" ]; then
+  info "Configuring registry mirror: $REGISTRY_MIRROR"
+  # Update daemon.json with registry mirror
+  jq --arg mirror "$REGISTRY_MIRROR" '. + {"registry-mirrors": [$mirror]}' \
+    /etc/docker/daemon.json > /tmp/daemon.json && mv /tmp/daemon.json /etc/docker/daemon.json
+fi
+
+# Configure DNS servers from host's resolv.conf
+# This is needed in Docker-in-Docker environments where build containers
+# don't inherit the host's DNS configuration
+if [ -f /etc/resolv.conf ]; then
+  DNS_SERVERS=$(grep "^nameserver" /etc/resolv.conf | awk '{print $2}' | head -3 | jq -R . | jq -s .)
+  if [ -n "$DNS_SERVERS" ] && [ "$DNS_SERVERS" != "[]" ]; then
+    info "Configuring DNS servers: $(echo $DNS_SERVERS | jq -r 'join(", ")')"
+    jq --argjson dns "$DNS_SERVERS" '. + {"dns": $dns}' \
+      /etc/docker/daemon.json > /tmp/daemon.json && mv /tmp/daemon.json /etc/docker/daemon.json
+  fi
+fi
+
+# Override storage driver if specified (default: overlay2 from daemon.json)
+# Use fuse-overlayfs for DinD environments where nested overlay2 isn't supported
+if [ -n "$STORAGE_DRIVER" ]; then
+  info "Configuring storage driver: $STORAGE_DRIVER"
+  jq --arg driver "$STORAGE_DRIVER" '. + {"storage-driver": $driver}' \
+    /etc/docker/daemon.json > /tmp/daemon.json && mv /tmp/daemon.json /etc/docker/daemon.json
+fi
+
+# Start supervisord in background (log to file for debugging)
+# Alpine uses /etc/supervisord.conf, Ubuntu uses /etc/supervisor/supervisord.conf
+if [ -f /etc/supervisord.conf ]; then
+  SUPERVISORD_CONF=/etc/supervisord.conf
+else
+  SUPERVISORD_CONF=/etc/supervisor/supervisord.conf
+fi
+/usr/bin/supervisord -c "$SUPERVISORD_CONF" >/tmp/supervisord.log 2>&1 &
+
+info "Starting Docker daemon..."
+
+# Wait for Docker daemon to be ready
+timeout=30
+while ! docker info >/dev/null 2>&1; do
+    timeout=$((timeout - 1))
+    if [ $timeout -le 0 ]; then
+        error "Docker daemon failed to start within 30 seconds"
+        exit 1
+    fi
+    sleep 1
+done
+
+success "Docker daemon ready"
+
+# Configure DHI registry credentials if provided via environment variables
+if [ -n "$DHI_USERNAME" ] && [ -n "$DHI_PASSWORD" ]; then
+  info "Configuring DHI registry credentials"
+  echo "$DHI_PASSWORD" | docker login dhi.io -u "$DHI_USERNAME" --password-stdin >/dev/null 2>&1 || true
+fi
+
+# Caching strategy:
+# 1. BUILD_CACHE_DIR (PVC) - BuildKit layer cache stored on shared RWX PVC
+#    Per-app cache IDs (via CACHE_KEY) isolate apps within the shared storage
+# 2. S3_CACHE_BUCKET - Package manager caches (npm, pip, bundle, etc.)
+#    Downloaded before build, uploaded after - handled in bin/build
+#
+# Both can be used together: PVC for BuildKit layers, S3 for package managers
+
+if [ -n "$BUILD_CACHE_DIR" ]; then
+  # Per-app buildkit storage to allow concurrent builds
+  # CACHE_KEY is passed from ClusterBuildStrategy (e.g., "migetzxy-myapp")
+  BUILDKIT_CACHE_DIR="$BUILD_CACHE_DIR/buildkit"
+  if [ -n "$CACHE_KEY" ]; then
+    BUILDKIT_CACHE_DIR="$BUILD_CACHE_DIR/buildkit/$CACHE_KEY"
+  fi
+
+  info "BuildKit mode: layer cache on PVC ($BUILDKIT_CACHE_DIR)"
+  mkdir -p "$BUILDKIT_CACHE_DIR"
+
+  # Detect host path for cache dir (needed when using host docker.sock)
+  # Container bind mounts need host paths, not container paths
+  HOST_CACHE_DIR="$BUILD_CACHE_DIR"
+  SELF_HOSTNAME=$(hostname)
+  HOST_PATH=$(docker inspect "$SELF_HOSTNAME" --format '{{json .Mounts}}' 2>/dev/null | jq -r ".[] | select(.Destination==\"$BUILD_CACHE_DIR\") | .Source" 2>/dev/null)
+  if [ -n "$HOST_PATH" ] && [ "$HOST_PATH" != "null" ]; then
+    HOST_CACHE_DIR="$HOST_PATH"
+    info "Detected host cache path: $HOST_CACHE_DIR"
+  fi
+
+  # Use cache dir for socket too (shared between host and container)
+  BUILDKIT_SOCKET_DIR="$BUILD_CACHE_DIR/buildkit-socket"
+  HOST_SOCKET_DIR="$HOST_CACHE_DIR/buildkit-socket"
+  HOST_BUILDKIT_CACHE="$HOST_CACHE_DIR/buildkit"
+  mkdir -p "$BUILDKIT_SOCKET_DIR"
+  # Clean up any stale socket from previous runs
+  rm -f "$BUILDKIT_SOCKET_DIR/buildkitd.sock" 2>/dev/null || true
+  docker rm -f buildkitd >/dev/null 2>&1 || true
+
+  # Extract mirror host from URL if set
+  MIRROR_HOST=""
+  if [ -n "$REGISTRY_MIRROR" ]; then
+    MIRROR_HOST=$(echo "$REGISTRY_MIRROR" | sed 's|^https\?://||')
+  fi
+
+  # Build buildkitd.toml config - use PVC for cache storage
+  # Config must be in shared path (not /tmp) since docker commands use host paths
+  BUILDKIT_CONFIG="$BUILDKIT_SOCKET_DIR/buildkitd.toml"
+  HOST_BUILDKIT_CONFIG="$HOST_SOCKET_DIR/buildkitd.toml"
+  # BUILDKIT_CACHE_SIZE in bytes (default 5GB)
+  CACHE_SIZE_BYTES="${BUILDKIT_CACHE_SIZE:-5368709120}"
+
+  cat > "$BUILDKIT_CONFIG" <<EOF
+insecure-entitlements = ["network.host"]
+
+[worker.oci]
+  gc = true
+  gckeepstorage = $CACHE_SIZE_BYTES
+EOF
+
+  if [ -n "$MIRROR_HOST" ]; then
+    cat >> "$BUILDKIT_CONFIG" <<EOF
+
+[registry."docker.io"]
+  mirrors = ["$MIRROR_HOST"]
+EOF
+  fi
+
+  # Start buildkitd with PVC mounted for cache storage
+  # Also mount Docker config for registry authentication if available
+  DOCKER_CONFIG_MOUNT=""
+  if [ -f /root/.docker/config.json ]; then
+    DOCKER_CONFIG_MOUNT="-v /root/.docker/config.json:/root/.docker/config.json:ro"
+  fi
+
+  # Pre-pull buildkit image to avoid timeout during container start
+  docker pull moby/buildkit:buildx-stable-1 >/dev/null 2>&1 || true
+
+  BUILDKIT_CONFIGURED=false
+  BUILDKIT_ERROR=""
+  DOCKER_RUN_OUTPUT=$(docker run -d --name buildkitd \
+    --privileged --network host \
+    -v "$HOST_SOCKET_DIR":/run/buildkit \
+    -v "$HOST_BUILDKIT_CONFIG":/etc/buildkit/buildkitd.toml:ro \
+    -v "$HOST_BUILDKIT_CACHE":/var/lib/buildkit \
+    $DOCKER_CONFIG_MOUNT \
+    moby/buildkit:buildx-stable-1 \
+    --addr unix:///run/buildkit/buildkitd.sock \
+    --config /etc/buildkit/buildkitd.toml 2>&1)
+  if [ $? -eq 0 ]; then
+
+    timeout=15
+    while [ ! -S "$BUILDKIT_SOCKET_DIR/buildkitd.sock" ]; do
+      timeout=$((timeout - 1))
+      if [ $timeout -le 0 ]; then
+        BUILDKIT_ERROR="socket timeout after 15s"
+        # Check if container is still running
+        if ! docker ps -q -f name=buildkitd | grep -q .; then
+          BUILDKIT_ERROR="container exited: $(docker logs buildkitd 2>&1 | tail -5)"
+        fi
+        break
+      fi
+      sleep 1
+    done
+
+    if [ -S "$BUILDKIT_SOCKET_DIR/buildkitd.sock" ]; then
+      if docker buildx create --name build --driver remote \
+        unix://"$BUILDKIT_SOCKET_DIR/buildkitd.sock" --use >/dev/null 2>&1; then
+        BUILDKIT_CONFIGURED=true
+        info "BuildKit daemon ready (cache: $BUILDKIT_CACHE_DIR)"
+      else
+        BUILDKIT_ERROR="failed to create buildx remote driver"
+      fi
+    fi
+  else
+    BUILDKIT_ERROR="failed to start container: $DOCKER_RUN_OUTPUT"
+  fi
+
+  # Fall back to docker driver if buildkitd unavailable
+  if [ "$BUILDKIT_CONFIGURED" = "false" ]; then
+    info "BuildKit daemon failed ($BUILDKIT_ERROR), falling back to docker driver"
+    docker rm -f buildkitd >/dev/null 2>&1 || true
+    docker buildx create --name build --driver docker --use >/dev/null 2>&1 || true
+  fi
+
+elif [ -n "$CACHE_IMAGE" ]; then
+  # Registry cache configured - need docker-container driver for cache export
+  # Use network=host so BuildKit container can resolve DNS and reach apt/npm/etc
+  info "BuildKit mode: registry cache ($CACHE_IMAGE)"
+  docker buildx create --name build --driver docker-container --driver-opt network=host --use >/dev/null 2>&1 || true
+
+else
+  # No cache configured - use docker's built-in buildkit
+  docker buildx create --name build --driver docker --use >/dev/null 2>&1 || true
+fi
+
+# Run the build
+exec /buildpack/bin/build "$@"

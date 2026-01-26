@@ -1,0 +1,199 @@
+---
+title: "Build Caching"
+description: "Speed up builds with registry-based caching, shared package manager caches, and optimized Docker layer ordering."
+---
+
+## Overview
+
+migetpacks supports three complementary caching strategies that work together to minimize build times:
+
+1. **Registry-based BuildKit cache** (`CACHE_IMAGE`) - stores build layers in a container registry
+2. **Shared package manager cache** (`BUILD_CACHE_DIR`) - persists dependency downloads on a shared volume
+3. **Docker layer caching** - optimized COPY order in generated Dockerfiles
+
+## Registry-Based Cache (CACHE_IMAGE)
+
+Store BuildKit cache layers in a container registry for sharing across builds, runners, and CI environments.
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e CACHE_IMAGE=registry.io/my-app:buildcache \
+  miget/migetpacks:latest
+```
+
+### Cache Mode
+
+Control how much data is stored in the registry cache with `CACHE_MODE`:
+
+<Tabs>
+  <Tab title="min (default)">
+    Caches only the final layer. Produces smaller cache images but fewer cache hits on intermediate layers.
+    ```bash
+    -e CACHE_MODE=min
+    ```
+  </Tab>
+  <Tab title="max">
+    Caches all intermediate layers. Larger cache images but better cache hit rates, especially when only source code changes.
+    ```bash
+    -e CACHE_MODE=max
+    ```
+  </Tab>
+</Tabs>
+
+### Additional Cache Sources (CACHE_FROM)
+
+Read from multiple cache sources (comma-separated). Useful for sharing cache across branches or teams:
+
+```bash
+-e CACHE_IMAGE=registry.io/my-app:cache-main \
+-e CACHE_FROM=registry.io/my-app:cache-dev,registry.io/my-app:cache-feature
+```
+
+<Note>
+`CACHE_FROM` sources are read-only. The build always writes to `CACHE_IMAGE` but can read from both `CACHE_IMAGE` and all `CACHE_FROM` entries.
+</Note>
+
+### Force Fresh Build (NO_CACHE)
+
+Skip reading from cache while still exporting to the cache registry:
+
+```bash
+-e NO_CACHE=true
+```
+
+When `NO_CACHE=true`:
+- `--no-cache` is passed to the build
+- `CACHE_FROM` sources are skipped
+- Cache is still exported to `CACHE_IMAGE` (so subsequent builds can use it)
+
+### Insecure Registry (CACHE_REGISTRY_INSECURE)
+
+For internal HTTP registries (e.g., a local cache registry), enable insecure mode:
+
+```bash
+-e CACHE_IMAGE=http-registry.internal:5000/my-app:buildcache \
+-e CACHE_REGISTRY_INSECURE=true
+```
+
+## Shared Package Manager Cache (BUILD_CACHE_DIR)
+
+Mount a persistent volume to cache package manager downloads across builds. This is especially effective on self-hosted runners or Kubernetes environments with ReadWriteMany (RWX) PersistentVolumeClaims.
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /persistent-cache:/cache \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e BUILD_CACHE_DIR=/cache \
+  miget/migetpacks:latest
+```
+
+### Cache Directories by Language
+
+| Language | Cache Location | What's Cached |
+|----------|---------------|---------------|
+| Node.js | `/cache/npm`, `/cache/yarn`, `/cache/pnpm` | Package tarballs |
+| Python | `/cache/pip`, `/cache/uv` | Wheel files |
+| Ruby | `/cache/bundler` | Gem files |
+| Go | `/cache/go` | Module sources |
+| Rust | `/cache/cargo` | Crate sources |
+| Java | `/cache/maven`, `/cache/gradle` | Dependencies |
+| PHP | `/cache/composer` | Composer packages |
+
+<Note>
+BuildKit cache mounts (`--mount=type=cache,sharing=shared`) are automatically added to generated Dockerfiles for all supported languages. The `sharing=shared` mode allows concurrent builds to share cache without locking.
+</Note>
+
+### Kubernetes PVC Example
+
+```yaml
+spec:
+  volumes:
+    - name: build-cache
+      persistentVolumeClaim:
+        claimName: build-cache  # RWX PVC
+  buildSteps:
+    - name: build
+      image: miget/migetpacks:latest
+      volumeMounts:
+        - name: build-cache
+          mountPath: /cache
+      env:
+        - name: BUILD_CACHE_DIR
+          value: /cache
+```
+
+## Docker Layer Caching
+
+All generated Dockerfiles use optimized COPY ordering to maximize Docker layer cache hits. This requires no configuration and works automatically.
+
+### How It Works
+
+```dockerfile
+# 1. Copy dependency files first (changes rarely)
+COPY package.json package-lock.json ./
+
+# 2. Install dependencies (CACHED if lockfiles unchanged)
+RUN npm ci
+
+# 3. Copy source code (changes frequently)
+COPY . .
+
+# 4. Build and cleanup
+RUN npm run build && npm prune --production
+```
+
+### Cache Behavior
+
+| Scenario | Dependency Install | Build Step |
+|----------|-------------------|------------|
+| First build | Runs | Runs |
+| Source code change only | **CACHED** | Runs |
+| Lockfile change | Runs | Runs |
+| No changes | **CACHED** | **CACHED** |
+
+This optimization is applied for all languages:
+- **Node.js**: `package.json` + lockfile copied first
+- **Python**: `requirements.txt` / `pyproject.toml` copied first
+- **Ruby**: `Gemfile` + `Gemfile.lock` copied first
+- **Go**: `go.mod` + `go.sum` copied first
+- **Rust**: `Cargo.toml` + `Cargo.lock` copied first
+- **Java**: `pom.xml` / `build.gradle` copied first
+- **.NET**: `*.csproj` / `*.sln` copied first
+
+## Combining Strategies
+
+For optimal performance, use all three strategies together:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /persistent-cache:/cache \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e CACHE_IMAGE=registry.io/my-app:buildcache \
+  -e CACHE_MODE=max \
+  -e BUILD_CACHE_DIR=/cache \
+  -e REGISTRY_MIRROR=https://registry.example.io/mirror \
+  miget/migetpacks:latest
+```
+
+This gives you:
+- **Registry cache**: BuildKit layers cached remotely (works across machines)
+- **Package cache**: Dependency downloads cached locally (fastest for reinstalls)
+- **Layer cache**: Docker layer ordering optimized (fastest for source-only changes)
+- **Registry mirror**: Base image pulls from local cache (fastest for image downloads)
+
+## Registry Mirror
+
+Use `REGISTRY_MIRROR` to configure a pull-through cache for Docker Hub base images:
+
+```bash
+-e REGISTRY_MIRROR=https://registry.example.io/mirror
+```
+
+The mirror is configured in the Docker daemon's `registry-mirrors` setting, so all image pulls automatically try the mirror first before falling back to Docker Hub.

@@ -1,0 +1,196 @@
+---
+title: "Self-Hosted Runners"
+description: "Performance tips for CI/CD runners"
+---
+
+## Overview
+
+Running migetpacks on self-hosted CI/CD runners (GitHub Actions, GitLab, etc.) gives you control over the build environment and enables persistent caching. However, storage architecture and configuration significantly impact build performance.
+
+## Storage Architecture
+
+The underlying storage for `/var/lib/docker` (where Docker stores layers and images) directly affects build speed.
+
+### Local NVMe/SSD
+
+Best performance. Docker layer operations (unpacking, caching, building) are I/O-intensive and benefit from low-latency local storage.
+
+```text
+Runner → Docker → ext4 → NVMe/SSD
+```
+
+### Distributed Storage (CephFS, NFS, EFS)
+
+Slower due to the I/O path. Docker typically uses a loopback device on top of distributed filesystems, adding overhead:
+
+```text
+Runner → Docker → ext4 → loopback → CephFS → network → OSD
+```
+
+**Symptoms of slow distributed storage:**
+- High `iowait` during layer unpacking (visible in `top` or `iostat`)
+- First builds taking 5-10x longer than subsequent builds
+- Slow `docker pull` operations
+
+<Warning>
+High iowait during layer unpacking is normal for distributed storage. This is not a migetpacks issue -- it is inherent to Docker's storage driver writing many small files through the network storage path.
+</Warning>
+
+### Storage Driver Options
+
+migetpacks defaults to `overlay2` but supports alternative storage drivers via the `STORAGE_DRIVER` environment variable:
+
+```bash
+# For nested Docker-in-Docker on some storage backends
+STORAGE_DRIVER=fuse-overlayfs
+```
+
+Use `fuse-overlayfs` when running nested DinD (e.g., migetpacks inside another Docker container) where `overlay2` is not available.
+
+## Performance Tips
+
+### 1. Pre-pull Base Images
+
+Pull commonly used base images during runner initialization to avoid cold-start delays:
+
+```bash
+# Runner startup script
+docker pull node:20-slim &
+docker pull ruby:3.2-slim &
+docker pull python:3.11-slim &
+docker pull golang:1.22 &
+wait
+```
+
+### 2. Use Registry Mirrors
+
+Configure a pull-through cache registry (e.g., Harbor proxy cache) to avoid hitting Docker Hub rate limits and reduce pull times:
+
+```bash
+REGISTRY_MIRROR=https://registry.example.io/mirror
+```
+
+The mirror is configured in the Docker daemon's `registry-mirrors` setting inside migetpacks, so all image pulls automatically try the mirror first.
+
+### 3. Persistent Cache Directory
+
+Mount a persistent directory for package manager caches that survives runner restarts:
+
+```bash
+# Create persistent cache directory on the runner
+mkdir -p /home/runner/migetpacks-cache
+
+# Pass it to migetpacks
+docker run --rm \
+  -v /home/runner/migetpacks-cache:/cache \
+  -e BUILD_CACHE_DIR=/cache \
+  miget/migetpacks:latest
+```
+
+### 4. Docker Layer Cache Persistence
+
+Docker layer cache persists in `/var/lib/docker` between builds on the same runner. This means:
+
+- Base images are pulled only once
+- Unchanged layers from previous builds are reused
+- BuildKit inline cache provides cross-build layer reuse
+
+Ensure your runner does not prune Docker images between builds unless disk space is constrained.
+
+### 5. Registry-Based BuildKit Cache
+
+Use `CACHE_IMAGE` to store and retrieve BuildKit cache from a registry. This works across runners and survives runner reprovisioning:
+
+```bash
+CACHE_IMAGE=registry.io/your-org/your-app:cache
+CACHE_MODE=max  # Cache all intermediate layers (better hit rate)
+```
+
+## GitHub Actions Workflow
+
+A complete workflow for self-hosted runners with persistent caching:
+
+```yaml
+name: Build with migetpacks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: your-registry.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Setup cache directory
+        run: mkdir -p /home/runner/migetpacks-cache
+
+      - name: Build with migetpacks
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace/source:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /home/runner/migetpacks-cache:/cache \
+            -e OUTPUT_IMAGE=your-registry.io/app:${{ github.sha }} \
+            -e BUILD_CACHE_DIR=/cache \
+            -e USE_DHI=true \
+            -e REGISTRY_MIRROR=https://registry.example.io/mirror \
+            -e CACHE_IMAGE=your-registry.io/app:cache \
+            -e CACHE_MODE=max \
+            miget/migetpacks:latest
+
+      - name: Tag latest (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag your-registry.io/app:${{ github.sha }} your-registry.io/app:latest
+          docker push your-registry.io/app:latest
+```
+
+## Build Time Expectations
+
+| Scenario | First Build | Subsequent Builds |
+|----------|------------|-------------------|
+| Local NVMe, no cache | 30-120s | 10-30s |
+| Local NVMe, with cache | 20-60s | 5-15s |
+| CephFS, no cache | 60-300s | 20-60s |
+| CephFS, with cache | 40-120s | 10-30s |
+
+These times vary based on application size, dependency count, and network speed to registries.
+
+## Troubleshooting
+
+### High iowait during builds
+
+This is normal for distributed storage. The Docker storage driver writes many small files during layer unpacking. Consider moving `/var/lib/docker` to local SSD if available.
+
+### Docker Hub rate limits
+
+Use `REGISTRY_MIRROR` to configure a pull-through cache, or authenticate with Docker Hub to increase rate limits:
+
+```bash
+docker login -u your-user -p your-token
+```
+
+### Out of disk space
+
+Docker layer cache grows over time. Schedule periodic pruning on runners:
+
+```bash
+# Prune images older than 7 days (run during off-hours)
+docker image prune -a --filter "until=168h" --force
+```
+
+### Slow first build after runner restart
+
+The first build after a restart needs to pull base images and warm the layer cache. Use pre-pulling in your runner startup script to minimize this delay.

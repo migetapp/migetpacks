@@ -1,0 +1,203 @@
+---
+title: "Version Detection"
+description: "How migetpacks detects language versions"
+---
+
+migetpacks automatically detects the language version for your project by checking environment variables, version files, and project configuration files in a defined priority order. If no version is found, a sensible default is used.
+
+## Detection Priority by Language
+
+Each language checks sources in the order listed below. The first match wins.
+
+### Node.js
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `NODE_VERSION` env var | `NODE_VERSION=20.11.0` |
+| 2 | `.node-version` file | `20.11.0` |
+| 3 | `.nvmrc` file | `20` |
+| 4 | `package.json` `engines.node` | `"node": ">=20"` |
+| - | Default | `22.16.0` |
+
+### Bun
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `BUN_VERSION` env var | `BUN_VERSION=1.1.0` |
+| 2 | `.bun-version` file | `1.1.0` |
+| 3 | `bunfig.toml` `version` field | `version = "1.1.0"` |
+| - | Default | `1.3.4` |
+
+### Deno
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `DENO_VERSION` env var | `DENO_VERSION=2.0.0` |
+| 2 | `.deno-version` file | `2.0.0` |
+| 3 | `.dvmrc` file | `2.0.0` |
+| 4 | `deno.json` `version` field | `"version": "2.0.0"` |
+| - | Default | `2.6.1` |
+
+### Ruby
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `RUBY_VERSION` env var | `RUBY_VERSION=3.3.0` |
+| 2 | `.ruby-version` file | `3.3.0` |
+| 3 | `Gemfile` ruby directive | `ruby "3.3.0"` |
+| - | Default | `3.4.4` |
+
+### Python
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `PYTHON_VERSION` env var | `PYTHON_VERSION=3.12.0` |
+| 2 | `.python-version` file | `3.12.0` |
+| 3 | `runtime.txt` | `python-3.12.0` |
+| 4 | `uv.lock` `requires-python` | `requires-python = ">=3.13"` |
+| 5 | `pyproject.toml` `requires-python` | `requires-python = ">=3.12"` |
+| - | Default | `3.12.8` |
+
+### Go
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `GO_VERSION` env var | `GO_VERSION=1.22.0` |
+| 2 | `.go-version` file | `1.22.0` |
+| 3 | `go.mod` go directive | `go 1.22` |
+| - | Default | `1.25.0` |
+
+### Rust
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `RUSTUP_TOOLCHAIN` env var | `RUSTUP_TOOLCHAIN=1.80.0` |
+| 2 | `rust-toolchain` file | `1.80.0` |
+| 3 | `rust-toolchain.toml` channel | `channel = "1.80.0"` |
+| - | Default | `1.92.0` |
+
+### PHP
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `PHP_VERSION` env var | `PHP_VERSION=8.3` |
+| 2 | `.php-version` file | `8.3` |
+| 3 | `composer.json` `require.php` | `"php": ">=8.2"` |
+| - | Default | `8.3` |
+
+### Java
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `JAVA_VERSION` env var | `JAVA_VERSION=21` |
+| 2 | `.java-version` file | `21` |
+| 3 | `system.properties` | `java.runtime.version=21` |
+| 4 | `pom.xml` properties | `<java.version>21</java.version>` |
+| - | Default | `21` |
+
+### Kotlin
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `KOTLIN_VERSION` env var | `KOTLIN_VERSION=2.0.0` |
+| 2 | `.kotlin-version` file | `2.0.0` |
+| 3 | `gradle.properties` | `kotlin.version=2.0.0` |
+| 4 | `build.gradle.kts` plugin version | `kotlin("jvm") version "2.0.0"` |
+| - | Default | `2.1.0` |
+
+### Scala
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `SCALA_VERSION` env var | `SCALA_VERSION=3.4.0` |
+| 2 | `.scala-version` file | `3.4.0` |
+| 3 | `build.sbt` scalaVersion | `scalaVersion := "3.4.0"` |
+| 4 | `project/build.properties` | `scala.version=3.4.0` |
+| - | Default | `3.5.2` |
+
+### Clojure
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `CLOJURE_VERSION` env var | `CLOJURE_VERSION=1.12.0` |
+| 2 | `.clojure-version` file | `1.12.0` |
+| 3 | `project.clj` dependency | `[org.clojure/clojure "1.12.0"]` |
+| 4 | `deps.edn` dependency | `org.clojure/clojure {:mvn/version "1.12.0"}` |
+| - | Default | `1.11.1` |
+
+### .NET
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `DOTNET_VERSION` env var | `DOTNET_VERSION=8.0` |
+| 2 | `global.json` SDK version | `"version": "8.0.100"` |
+| 3 | `*.csproj` TargetFramework | `<TargetFramework>net8.0</TargetFramework>` |
+| - | Default | `8.0` |
+
+### Elixir
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `ELIXIR_VERSION` env var | `ELIXIR_VERSION=1.17.0` |
+| 2 | `.elixir-version` file | `1.17.0` |
+| 3 | `.tool-versions` (asdf) | `elixir 1.17.0` |
+| - | Default | `1.18.4` |
+
+## Version Normalization
+
+migetpacks normalizes version constraints found in project files to Docker-compatible image tags. The following transformations are applied:
+
+### Prefix Removal
+
+The `v` prefix is stripped from versions:
+
+```text
+v20.11.0  ->  20.11.0
+```
+
+### Semver Range Operators
+
+Operators like `>=`, `^`, `~`, `>`, `<`, and `=` are removed, and the base version is extracted:
+
+```text
+>=18       ->  18
+^20.0.0    ->  20.0
+~20.0.0    ->  20.0
+>18        ->  18
+```
+
+For full semver versions with operators, the patch version is dropped:
+
+```text
+^20.11.1   ->  20.11
+~3.12.0    ->  3.12
+```
+
+### Wildcard Patterns
+
+The `.x` and `.*` patterns are reduced to the major version:
+
+```text
+20.x       ->  20
+22.*       ->  22
+```
+
+### OR Alternatives
+
+When a version string contains `||` separated alternatives, the highest major version is selected:
+
+```text
+20.x || 22.x || 24.x   ->  24
+>=18 || >=20            ->  20
+```
+
+### Plain Versions
+
+Explicit versions without operators are kept as-is, since Docker Hub has tags for all common formats:
+
+```text
+20         ->  20
+20.11      ->  20.11
+20.11.0    ->  20.11.0
+3.12.8     ->  3.12.8
+```

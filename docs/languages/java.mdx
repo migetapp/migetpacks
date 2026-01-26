@@ -1,0 +1,189 @@
+---
+title: "Java"
+description: "Build and deploy Java applications with migetpacks using Maven or Gradle."
+---
+
+## Detection
+
+migetpacks detects a Java application when any of the following files are present in the project root:
+
+- `pom.xml` (Maven)
+- `build.gradle` (Gradle, Groovy DSL)
+- `build.gradle.kts` (Gradle, Kotlin DSL)
+
+## Version Detection
+
+Java version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `.java-version` | `21` |
+| `system.properties` | `java.runtime.version=21` |
+| `pom.xml` (`<java.version>` or `<maven.compiler.release>`) | `<java.version>21</java.version>` |
+| Default | `21` |
+
+### Version Normalization
+
+Legacy version formats are normalized for Docker image compatibility:
+
+| Input | Normalized |
+|-------|-----------|
+| `1.8` | `8` |
+| `1.11` | `11` |
+| `17` | `17` |
+| `21` | `21` |
+
+## Build Process
+
+### Build Tool Detection
+
+migetpacks automatically detects the build tool:
+
+| File Present | Build Tool | Build Image |
+|-------------|-----------|-------------|
+| `pom.xml` | Maven | `maven:3-eclipse-temurin-{version}` |
+| `build.gradle` or `build.gradle.kts` | Gradle | `gradle:jdk{version}` |
+
+### Gradle Wrapper
+
+If `gradlew` is present in the project root, migetpacks uses the Gradle Wrapper instead of the system Gradle for correct version compatibility.
+
+### Generated Dockerfile
+
+```dockerfile
+# Build stage
+FROM maven:3-eclipse-temurin-21 AS builder
+WORKDIR /build
+
+# Layer caching: copy build files first
+COPY pom.xml ./
+
+# Download dependencies (cached if pom.xml unchanged)
+RUN mvn dependency:go-offline -B || true
+
+# Copy source code
+COPY . .
+
+# Build and cleanup source
+RUN mvn package -DskipTests -B \
+    && rm -rf src/ .mvn/ mvnw* pom.xml
+
+# Runtime stage
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+For Gradle projects:
+
+```dockerfile
+FROM gradle:jdk21 AS builder
+WORKDIR /build
+
+COPY build.gradle* settings.gradle* ./
+RUN gradle dependencies --no-daemon || true
+
+COPY . .
+RUN gradle build -x test --no-daemon \
+    && rm -rf src/ gradle/ gradlew* build.gradle*
+```
+
+## Run Command
+
+The default run command depends on the build tool output:
+
+```bash
+java -jar target/*.jar
+```
+
+Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: java -jar target/myapp-1.0.jar
+```
+
+### JVM Configuration
+
+The following environment variables are set for production:
+
+| Variable | Value |
+|----------|-------|
+| `JAVA_OPTS` | `-Dfile.encoding=UTF-8 -XX:MaxRAMPercentage=80.0` |
+| `JAVA_TOOL_OPTIONS` | `-Dfile.encoding=UTF-8` |
+
+## Caching
+
+### Layer Caching
+
+Dependencies are cached by copying build definition files before the full source:
+
+| Build Tool | Cached Files |
+|-----------|-------------|
+| Maven | `pom.xml` |
+| Gradle | `build.gradle*`, `settings.gradle*`, `gradlew`, `gradle/` |
+
+| Scenario | Dependency Install |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | **Cached** |
+| Build file change | Runs |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, build tool caches persist at:
+
+| Cache Path | Contents |
+|------------|----------|
+| `/cache/maven` | Maven repository (`~/.m2/repository`) |
+| `/cache/gradle` | Gradle caches and wrapper |
+
+## DHI Support
+
+<Info>
+Docker Hardened Images are supported for Java builds.
+</Info>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/eclipse-temurin:{version}-jdk-dev` |
+| Runtime | `dhi.io/eclipse-temurin:{version}` |
+
+### DHI Notes
+
+- Eclipse Temurin DHI images do **not** include Maven or Gradle. Build tools are installed via `apt-get` in the builder stage.
+- Runtime images are distroless (no shell, no `apt-get`).
+- The `nonroot` user is used instead of the `miget` user.
+- Version normalization applies: `1.8` becomes `8`, `1.11` becomes `11`.
+
+### Example with DHI
+
+```bash
+docker run --rm \
+  -v /path/to/java-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-java-app:latest \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/java-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-java-app:latest \
+  miget/migetpacks:latest
+```
+
+### With build cache
+
+```bash
+docker run --rm \
+  -v /path/to/java-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/build-cache:/cache \
+  -e OUTPUT_IMAGE=my-java-app:latest \
+  -e BUILD_CACHE_DIR=/cache \
+  miget/migetpacks:latest
+```

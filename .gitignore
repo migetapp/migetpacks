@@ -1,0 +1,18 @@
+# Build artifacts
+/tmp/
+*.log
+.gradle/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test outputs
+/test/output/
+test/fixtures/

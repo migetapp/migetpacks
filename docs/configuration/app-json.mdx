@@ -1,0 +1,210 @@
+---
+title: "app.json"
+description: "Application manifest support"
+---
+
+migetpacks supports `app.json` as an application manifest file. This file defines environment variables, process formation, deployment scripts, and buildpack configuration for your application.
+
+## Supported Fields
+
+| Field | Description |
+|-------|-------------|
+| `env` | Environment variables for build and runtime |
+| `formation` | Process configuration with replicas and sizing |
+| `scripts` | Deployment lifecycle scripts |
+| `buildpacks` | Buildpack (language) ordering |
+
+## Environment Variables
+
+The `env` field defines environment variables that are exported during the build and included in the [result JSON](/reference/result-json). Each variable can specify a fixed value, a generator, or be marked as required.
+
+```json
+{
+  "env": {
+    "RAILS_ENV": {
+      "value": "production"
+    },
+    "SECRET_KEY_BASE": {
+      "generator": "secret"
+    },
+    "DATABASE_URL": {
+      "required": true
+    },
+    "OPTIONAL_VAR": {
+      "description": "An optional config variable"
+    }
+  }
+}
+```
+
+### Variable Properties
+
+| Property | Description |
+|----------|-------------|
+| `value` | A fixed value for the variable. Exported during build and included in result JSON. |
+| `generator` | Set to `"secret"` to auto-generate a random secret value. The generated value appears in the result JSON. |
+| `required` | Set to `true` to indicate this variable must be provided at deploy time. Appears in result JSON with a `null` value. |
+| `description` | Human-readable description (informational only, not used during build). |
+
+## Formation
+
+The `formation` field defines process types with their replica count and compute size. This information is passed through to the result JSON for use by deployment orchestrators.
+
+```json
+{
+  "formation": {
+    "web": {
+      "quantity": 2,
+      "size": "standard-1x"
+    },
+    "worker": {
+      "quantity": 1,
+      "size": "standard-2x"
+    },
+    "clock": {
+      "quantity": 1
+    }
+  }
+}
+```
+
+### Formation Properties
+
+| Property | Description |
+|----------|-------------|
+| `quantity` | Number of replicas (instances) for this process type |
+| `size` | Compute size identifier (e.g., `standard-1x`, `performance-m`) |
+
+## Scripts
+
+The `scripts` field defines lifecycle hooks that run at specific points during deployment. These are included in the result JSON for the deployment system to execute.
+
+```json
+{
+  "scripts": {
+    "postdeploy": "bundle exec rails db:migrate",
+    "pr-predestroy": "bundle exec rails db:drop"
+  }
+}
+```
+
+### Supported Scripts
+
+| Script | When It Runs |
+|--------|-------------|
+| `postdeploy` | After a successful deployment (e.g., database migrations) |
+| `pr-predestroy` | Before a review app is destroyed (e.g., cleanup) |
+
+## Buildpacks
+
+The `buildpacks` field maps to migetpacks language support. Heroku-style buildpack URLs are automatically translated to migetpacks language identifiers.
+
+```json
+{
+  "buildpacks": [
+    {"url": "heroku/nodejs"},
+    {"url": "heroku/ruby"}
+  ]
+}
+```
+
+### Buildpack URL Mapping
+
+| Buildpack URL | migetpacks Language |
+|---------------|-------------------|
+| `heroku/nodejs` | `nodejs` |
+| `heroku/ruby` | `ruby` |
+| `heroku/python` | `python` |
+| `heroku/go` | `go` |
+| `heroku/java` | `java` |
+| `heroku/php` | `php` |
+| `heroku/scala` | `scala` |
+| `heroku/clojure` | `clojure` |
+
+When multiple buildpacks are specified, the order defines the build sequence. The first buildpack becomes the primary language (determines the runtime base image), and subsequent buildpacks provide additional build stages.
+
+<Note>
+  The `buildpacks` field in `app.json` is equivalent to setting the `BUILDPACKS` environment variable. If both are provided, the `BUILDPACKS` env var takes precedence.
+</Note>
+
+## Full Example
+
+```json
+{
+  "name": "my-rails-app",
+  "env": {
+    "RAILS_ENV": {
+      "value": "production"
+    },
+    "SECRET_KEY_BASE": {
+      "generator": "secret"
+    },
+    "DATABASE_URL": {
+      "required": true
+    },
+    "REDIS_URL": {
+      "required": true
+    },
+    "RAILS_LOG_TO_STDOUT": {
+      "value": "enabled"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 2,
+      "size": "standard-1x"
+    },
+    "worker": {
+      "quantity": 1,
+      "size": "standard-2x"
+    }
+  },
+  "scripts": {
+    "postdeploy": "bundle exec rails db:migrate"
+  },
+  "buildpacks": [
+    {"url": "heroku/nodejs"},
+    {"url": "heroku/ruby"}
+  ]
+}
+```
+
+## Result JSON Output
+
+Values defined in `app.json` appear in the [build result JSON](/reference/result-json) output. Here is how each field maps:
+
+```json
+{
+  "status": "success",
+  "images": [
+    {"name": "registry.io/my-app:latest", "ports": ["5000/tcp"]}
+  ],
+  "processes": {
+    "web": "bundle exec puma -C config/puma.rb",
+    "release": "bundle exec rails db:migrate",
+    "workers": [
+      {"name": "sidekiq", "command": "bundle exec sidekiq"}
+    ]
+  },
+  "env": {
+    "RAILS_ENV": "production",
+    "SECRET_KEY_BASE": "a1b2c3d4e5f6...",
+    "DATABASE_URL": null,
+    "REDIS_URL": null,
+    "RAILS_LOG_TO_STDOUT": "enabled"
+  },
+  "formation": [
+    {"name": "web", "quantity": 2, "size": "standard-1x"},
+    {"name": "worker", "quantity": 1, "size": "standard-2x"}
+  ],
+  "scripts": [
+    {"name": "postdeploy", "command": "bundle exec rails db:migrate"}
+  ],
+  "language": "ruby",
+  "timestamp": "2025-12-18T20:00:00Z"
+}
+```
+
+<Info>
+  Variables with `"generator": "secret"` will have their generated value populated in the `env` section of the result JSON. Variables with `"required": true` appear with a `null` value, indicating they must be supplied by the deployment system.
+</Info>

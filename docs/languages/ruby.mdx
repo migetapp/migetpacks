@@ -1,0 +1,213 @@
+---
+title: "Ruby"
+description: "Build and deploy Ruby and Rails applications with native gem support and asset precompilation."
+---
+
+## Detection
+
+migetpacks detects Ruby when any of these files are present in your project root:
+
+- `Gemfile`
+- `Rakefile`
+- `config.ru`
+
+## Version Detection
+
+Ruby version is resolved in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `RUBY_VERSION` env var | `RUBY_VERSION=3.3` |
+| 2 | `.ruby-version` file | `3.4.4` |
+| 3 | `ruby` declaration in `Gemfile` | `ruby "3.3.0"` |
+| 4 | Default | `3.4.4` |
+
+The `ruby-` prefix is automatically stripped (e.g., `ruby-3.2.0` becomes `3.2.0`).
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile with bundler layer caching:
+
+```dockerfile
+# Builder stage
+FROM ruby:3.4 AS builder
+WORKDIR /build
+
+# Layer 1: Copy Gemfile for layer caching
+COPY Gemfile Gemfile.lock ./
+
+# Layer 2: Configure and install gems (CACHED when Gemfile unchanged)
+ENV GEM_HOME=/build/vendor/bundle
+ENV BUNDLE_PATH=/build/vendor/bundle
+RUN gem install bundler -v '2.5.0' --no-document && \
+    bundle config set --local path '/build/vendor/bundle' && \
+    bundle config set --local deployment 'true' && \
+    bundle install --jobs 4 --retry 3
+
+# Layer 3: Copy source code
+COPY . .
+
+# Layer 4: Rails asset precompilation and cleanup
+ENV RAILS_ENV=production
+ENV SECRET_KEY_BASE_DUMMY=1
+RUN bundle exec rake assets:precompile && \
+    bundle exec rake assets:clean && \
+    rm -rf .git test spec vendor/bundle/ruby/*/cache
+
+# Runtime stage
+FROM ruby:3.4-slim
+RUN apt-get update && apt-get install -y libpq5 tzdata ca-certificates
+WORKDIR /app
+COPY --from=builder /build /app
+```
+
+### Dependency Detection
+
+migetpacks inspects your `Gemfile` and `Gemfile.lock` to install the correct system libraries:
+
+| Gem | Build Package | Runtime Package |
+|-----|--------------|----------------|
+| `pg` | `libpq-dev` | `libpq5` |
+| `mysql2`, `trilogy` | `libmariadb-dev` | `libmariadb3` |
+| `sqlite3` | `libsqlite3-dev` | `libsqlite3-0` |
+| `nokogiri`, `rails` | `libxml2-dev`, `libxslt1-dev` | `libxml2`, `libxslt1.1` |
+
+Additionally, `tzdata` and `ca-certificates` are always installed in the runtime image.
+
+### Bundler Version
+
+The bundler version is automatically detected from `Gemfile.lock` (the `BUNDLED WITH` section) and installed in the builder stage.
+
+### Local Gems
+
+If your `Gemfile` references local gems with `path:` options, those directories are automatically copied before `bundle install` to ensure they are available during gem resolution.
+
+### Rails Asset Precompilation
+
+If your project has a `Rakefile` and either `app/assets/` or `app/javascript/` directories, migetpacks automatically:
+
+1. Sets `RAILS_ENV=production`, `SECRET_KEY_BASE_DUMMY=1`, and a dummy `DATABASE_URL`
+2. Runs `bundle exec rake assets:precompile`
+3. Runs `bundle exec rake assets:clean`
+
+### Runtime Cleanup
+
+The following are removed from the final image:
+
+- `.git/`, `.github/`
+- `test/`, `tests/`, `spec/`, `features/`
+- `.rspec`, `.rubocop*`
+- `vendor/bundle/ruby/*/cache/`
+
+## Run Command
+
+The default run command is determined in this order:
+
+| Priority | Source | Command |
+|----------|--------|---------|
+| 1 | `RUN_COMMAND` env var | User-specified |
+| 2 | `web:` in Procfile | From Procfile |
+| 3 | `config.ru` exists | `bundle exec puma -C config/puma.rb` |
+| 4 | Default | `bundle exec ruby app.rb` |
+
+### Runtime Environment
+
+The following environment variables are set in the runtime container:
+
+```bash
+RAILS_ENV=production
+RACK_ENV=production
+RAILS_SERVE_STATIC_FILES=enabled
+RAILS_LOG_TO_STDOUT=enabled
+MALLOC_ARENA_MAX=2
+DISABLE_SPRING=1
+PUMA_PERSISTENT_TIMEOUT=95
+```
+
+## Caching
+
+### Docker Layer Caching
+
+Gems are installed in a separate layer before source code is copied. `bundle install` is only re-run when `Gemfile` or `Gemfile.lock` changes.
+
+### BuildKit Cache Mounts
+
+When `BUILD_CACHE_DIR` is configured, BuildKit cache mounts are used:
+
+| Cache Path | Contents |
+|-----------|----------|
+| `/cache/bundler` | Bundler gem cache |
+
+### Registry Cache
+
+Use `CACHE_IMAGE` to push/pull BuildKit inline cache layers to a registry for cross-build caching.
+
+## DHI Support
+
+<Check>Ruby is fully supported with Docker Hardened Images.</Check>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/ruby:{version}-dev` |
+| Runtime | `dhi.io/ruby:{version}` |
+
+### DHI-Specific Behavior
+
+The DHI runtime is distroless (no shell, no apt-get), which requires special handling:
+
+**Native gem libraries** are copied from the builder stage:
+```dockerfile
+COPY --from=builder /usr/lib/*/libpq.so* /usr/lib/
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /etc/ssl/certs /etc/ssl/certs
+```
+
+**Process commands are transformed** since shebangs do not work in distroless:
+- `./bin/rails server` becomes `ruby bin/rails server`
+- `bundle exec` commands work because bundler is installed as a gem
+
+**BUNDLER_VERSION** is explicitly set in the environment to prevent bundler from attempting auto-switching (which fails without `/usr/bin/env`).
+
+<Warning>
+Shell-dependent features like `.profile.d` scripts and shell variable expansion (`${PORT:-5000}`) are not available in DHI runtime images. Use environment variables directly.
+</Warning>
+
+## Multi-Buildpack
+
+Ruby applications commonly use Node.js for asset compilation. When `package.json` is detected alongside a Ruby project, Node.js is automatically added as a secondary buildpack:
+
+```bash
+# Explicit buildpack ordering
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-rails-app:latest \
+  -e BUILDPACKS=ruby,nodejs \
+  miget/migetpacks:latest
+```
+
+See the [Multi-Buildpack guide](/guides/multi-buildpack) for more details.
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-ruby-app:latest \
+  miget/migetpacks:latest
+```
+
+### With Custom Options
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/app:v1 \
+  -e RUBY_VERSION=3.3 \
+  -e RAILS_MASTER_KEY=abc123 \
+  -e BUNDLE_WITHOUT="development test" \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```

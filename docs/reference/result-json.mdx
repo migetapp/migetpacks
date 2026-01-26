@@ -1,0 +1,249 @@
+---
+title: "Result JSON"
+description: "Build output schema reference"
+---
+
+## Overview
+
+When `RESULT_FILE` is set, migetpacks writes a JSON file containing build metadata after every build. This file is used by post-build steps (e.g., deployment pipelines, notification services) to determine build status and access image information.
+
+<Note>
+The builder always exits with code 0 to ensure post-build steps (like Shipwright callbacks or sidecar containers) always execute. Check the `status` field in the result JSON to determine if the build actually succeeded or failed.
+</Note>
+
+## Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `"success"` or `"failed"` | Build outcome |
+| `exit_code` | number | Docker build exit code (0 on success) |
+| `error` | string | Error message (only present on failure) |
+| `images` | array | Built images with detected ports |
+| `processes` | object | Process types from Procfile |
+| `env` | object | Environment variables from app.json |
+| `formation` | array | Process formation from app.json |
+| `scripts` | array | Deployment scripts from app.json |
+| `build_time` | number | Build duration in seconds |
+| `language` | string | Detected or specified language |
+| `timestamp` | string | ISO 8601 build completion time |
+| `_shell` | boolean | `false` for distroless/DHI containers (no shell available) |
+
+### images
+
+```json
+{
+  "images": [
+    {
+      "name": "registry.io/your-org/your-app:latest",
+      "ports": ["5000/tcp"]
+    }
+  ]
+}
+```
+
+For Docker Compose builds, multiple images are listed:
+
+```json
+{
+  "images": [
+    {"name": "registry.io/myapp-api:latest", "ports": ["5000/tcp"]},
+    {"name": "registry.io/myapp-web:latest", "ports": ["3000/tcp"]}
+  ]
+}
+```
+
+### processes
+
+Parsed from the application's Procfile:
+
+```json
+{
+  "processes": {
+    "web": "bundle exec puma -C config/puma.rb",
+    "release": "bundle exec rails db:migrate",
+    "workers": [
+      {"name": "sidekiq", "command": "bundle exec sidekiq"},
+      {"name": "clock", "command": "bundle exec clockwork clock.rb"}
+    ]
+  }
+}
+```
+
+- `web` -- the primary web process (from `RUN_COMMAND`, Procfile `web:`, or language default)
+- `release` -- one-time release command (e.g., database migrations)
+- `workers` -- background worker processes (all non-web, non-release Procfile entries)
+
+### env
+
+Environment variables defined in `app.json`:
+
+```json
+{
+  "env": {
+    "SECRET_KEY_BASE": "a1b2c3d4e5f6...",
+    "RAILS_ENV": "production",
+    "DATABASE_URL": null
+  }
+}
+```
+
+- Variables with `"generator": "secret"` have auto-generated values
+- Variables with `"value": "..."` use the specified value
+- Variables with `"required": true` are `null` (must be provided at deploy time)
+
+### formation
+
+Process configuration from `app.json`:
+
+```json
+{
+  "formation": [
+    {"name": "web", "quantity": 2, "size": "standard-1x"},
+    {"name": "worker", "quantity": 1, "size": null}
+  ]
+}
+```
+
+### scripts
+
+Deployment scripts from `app.json`:
+
+```json
+{
+  "scripts": [
+    {"name": "postdeploy", "command": "bundle exec rails db:migrate"},
+    {"name": "pr-predestroy", "command": "bundle exec rails db:drop"}
+  ]
+}
+```
+
+### _shell
+
+Indicates whether the runtime container has a shell available:
+
+```json
+{
+  "_shell": false
+}
+```
+
+When `_shell` is `false` (DHI/distroless images), deployment systems should:
+- Use exec format for commands (no `/bin/sh -c` wrapper)
+- Pre-expand shell variables like `${PORT:-5000}`
+- Avoid relying on shebangs in scripts
+
+## Success Example
+
+A complete result file for a successful Ruby build:
+
+```json
+{
+  "status": "success",
+  "exit_code": 0,
+  "images": [
+    {
+      "name": "registry.io/your-org/your-app:latest",
+      "ports": ["5000/tcp"]
+    }
+  ],
+  "processes": {
+    "web": "bundle exec puma -C config/puma.rb",
+    "release": "bundle exec rails db:migrate",
+    "workers": [
+      {"name": "sidekiq", "command": "bundle exec sidekiq"}
+    ]
+  },
+  "env": {
+    "SECRET_KEY_BASE": "a1b2c3d4e5f6789...",
+    "RAILS_ENV": "production",
+    "DATABASE_URL": null
+  },
+  "formation": [
+    {"name": "web", "quantity": 2, "size": "standard-1x"},
+    {"name": "worker", "quantity": 1, "size": null}
+  ],
+  "scripts": [
+    {"name": "postdeploy", "command": "bundle exec rails db:migrate"}
+  ],
+  "build_time": 45,
+  "language": "ruby",
+  "timestamp": "2025-12-18T20:00:00Z"
+}
+```
+
+## Failure Example
+
+A result file for a failed build:
+
+```json
+{
+  "status": "failed",
+  "exit_code": 1,
+  "error": "Docker build failed: npm ERR! Missing: peer dependency react@^18.0.0",
+  "images": [],
+  "processes": {},
+  "build_time": 12,
+  "language": "nodejs",
+  "timestamp": "2025-12-18T20:01:00Z"
+}
+```
+
+## Usage
+
+### Reading in Shell Scripts
+
+```bash
+#!/bin/bash
+RESULT_FILE="/workspace/output/build-result.json"
+
+# Wait for result file
+while [ ! -f "$RESULT_FILE" ]; do sleep 2; done
+
+# Check status
+STATUS=$(jq -r '.status' "$RESULT_FILE")
+if [ "$STATUS" = "failed" ]; then
+  ERROR=$(jq -r '.error' "$RESULT_FILE")
+  echo "Build failed: $ERROR"
+  exit 1
+fi
+
+# Get image name
+IMAGE=$(jq -r '.images[0].name' "$RESULT_FILE")
+echo "Built image: $IMAGE"
+```
+
+### Reading in Python
+
+```python
+import json
+import time
+from pathlib import Path
+
+result_path = Path("/workspace/output/build-result.json")
+
+# Wait for result
+while not result_path.exists():
+    time.sleep(2)
+
+result = json.loads(result_path.read_text())
+
+if result["status"] == "failed":
+    raise Exception(f"Build failed: {result['error']}")
+
+image = result["images"][0]["name"]
+ports = result["images"][0]["ports"]
+print(f"Built {image} exposing {ports}")
+```
+
+### Shipwright Post-Build Step
+
+```yaml
+- name: deploy
+  image: your-deployer:latest
+  volumeMounts:
+    - name: results
+      mountPath: /workspace/output
+  env:
+    - name: RESULT_FILE
+      value: /workspace/output/build-result.json
+```

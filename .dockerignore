@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Documentation (only README.md included)
+*.md
+!README.md
+docs/
+
+# Development files
+Makefile
+shipwright/
+examples/
+test/
+test-all-examples.sh
+.claude/
+
+# Tests
+test/fixtures/
+*.test.js
+*.spec.js
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Build artifacts
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+target/
+dist/
+build/
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log

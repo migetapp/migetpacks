@@ -1,0 +1,857 @@
+#!/usr/bin/env bash
+# Detect language versions from project files
+# This script extracts version information from various project configuration files
+
+set -e
+
+BUILD_DIR=${1:-"."}
+
+# Normalize version constraint to Docker-compatible version
+# Handles:
+#   - "||" separated alternatives: "20.x || 22.x || 24.x" -> picks highest major version
+#   - semver operators: ">=18", "^20", "~20.0.0", ">18", "<22" -> extracts base version
+#   - "X.x" patterns: "20.x" -> "20"
+#   - Plain versions: "20.0.0" -> kept as-is (Docker has specific version tags)
+normalize_version_constraint() {
+  local constraint="$1"
+  local highest_major=0
+  local result=""
+
+  # Remove 'v' prefix if present
+  constraint=$(echo "$constraint" | sed 's/^v//')
+
+  # Check if constraint contains "||" (OR alternatives)
+  if echo "$constraint" | grep -q '||'; then
+    # Split by "||" and find the highest major version
+    # Use tr to split and process each alternative
+    local IFS_BACKUP="$IFS"
+
+    # Process each alternative separated by ||
+    while IFS= read -r alt; do
+      # Trim whitespace
+      alt=$(echo "$alt" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+      # Skip empty alternatives
+      [ -z "$alt" ] && continue
+
+      # Extract major version number from this alternative
+      # Remove operators and get the first number
+      local major=$(echo "$alt" | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+
+      if [ -n "$major" ] && [ "$major" -gt "$highest_major" ] 2>/dev/null; then
+        highest_major="$major"
+      fi
+    done <<< "$(echo "$constraint" | tr '|' '\n' | grep -v '^$')"
+
+    IFS="$IFS_BACKUP"
+
+    if [ "$highest_major" -gt 0 ]; then
+      echo "$highest_major"
+      return 0
+    fi
+  fi
+
+  # Check if constraint has semver operators that need normalization
+  if echo "$constraint" | grep -qE '^[><=^~]'; then
+    # Handle semver operators: >=, <=, >, <, ^, ~, =
+    # Extract the version number after the operator
+    result=$(echo "$constraint" | sed -E 's/^[><=^~]+[[:space:]]*//')
+
+    # For ^X.Y.Z or ~X.Y.Z, extract major.minor (these mean "compatible with")
+    # For >=X.Y or >X.Y, keep major.minor as minimum version
+    if echo "$result" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+      # Full semver X.Y.Z -> keep X.Y
+      result=$(echo "$result" | sed -E 's/^([0-9]+\.[0-9]+)\..*/\1/')
+    fi
+    # X.Y format is kept as-is
+
+    echo "$result"
+    return 0
+  fi
+
+  # Handle "X.x" or "X.*" patterns -> just major version
+  if echo "$constraint" | grep -qE '^[0-9]+\.[x*]$'; then
+    result=$(echo "$constraint" | sed -E 's/^([0-9]+)\.[x*]$/\1/')
+    echo "$result"
+    return 0
+  fi
+
+  # For explicit versions (20, 20.10, 20.10.0), keep as-is
+  # Docker Hub has tags for all these formats
+  echo "$constraint"
+}
+
+# Detect Node.js version
+detect_node_version() {
+  local version=""
+
+  # Check NODE_VERSION environment variable first
+  if [ -n "$NODE_VERSION" ]; then
+    version="$NODE_VERSION"
+  # Check .node-version
+  elif [ -f "$BUILD_DIR/.node-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.node-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+  # Check .nvmrc
+  elif [ -f "$BUILD_DIR/.nvmrc" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.nvmrc" | grep -v '^$' | head -1 | tr -d '[:space:]')
+  # Check package.json engines field
+  elif [ -f "$BUILD_DIR/package.json" ]; then
+    version=$(cat "$BUILD_DIR/package.json" | \
+      grep -E '"node"[[:space:]]*:' | \
+      sed -E 's/.*"node"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+  fi
+
+  # Default version if nothing specified
+  if [ -z "$version" ]; then
+    echo "22.16.0"
+    return 0
+  fi
+
+  # Normalize complex version constraints to Docker-compatible versions
+  # Handle "||" separated alternatives: "20.x || 22.x || 24.x" -> pick highest
+  # Handle semver operators: ">=18", "^20", "~20.0.0" -> extract base version
+  version=$(normalize_version_constraint "$version")
+
+  echo "$version"
+  return 0
+}
+
+# Detect Bun version
+detect_bun_version() {
+  local version=""
+
+  # Check BUN_VERSION environment variable first
+  if [ -n "$BUN_VERSION" ]; then
+    echo "$BUN_VERSION"
+    return 0
+  fi
+
+  # Check .bun-version
+  if [ -f "$BUILD_DIR/.bun-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.bun-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check bunfig.toml for version
+  if [ -f "$BUILD_DIR/bunfig.toml" ]; then
+    version=$(grep -E "^version[[:space:]]*=" "$BUILD_DIR/bunfig.toml" | \
+      sed -E 's/.*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  echo "1.3.4"
+  return 0
+}
+
+# Detect Ruby version
+detect_ruby_version() {
+  local version=""
+
+  # Check RUBY_VERSION environment variable first
+  if [ -n "$RUBY_VERSION" ]; then
+    version="$RUBY_VERSION"
+  # Check .ruby-version
+  elif [ -f "$BUILD_DIR/.ruby-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.ruby-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+  # Check Gemfile
+  elif [ -f "$BUILD_DIR/Gemfile" ]; then
+    version=$(grep -E "^ruby" "$BUILD_DIR/Gemfile" | \
+      sed -E "s/ruby[[:space:]]*['\"]([^'\"]+)['\"].*/\1/" | \
+      tr -d '[:space:]')
+  fi
+
+  # Default version if nothing specified
+  if [ -z "$version" ]; then
+    echo "3.4.4"
+    return 0
+  fi
+
+  # Strip 'ruby-' prefix if present (e.g., "ruby-3.2.0" -> "3.2.0")
+  version=$(echo "$version" | sed 's/^ruby-//')
+
+  # Normalize version constraints to Docker-compatible versions
+  version=$(normalize_version_constraint "$version")
+
+  echo "$version"
+  return 0
+}
+
+# Detect Python version
+detect_python_version() {
+  local version=""
+
+  # Check PYTHON_VERSION environment variable first
+  if [ -n "$PYTHON_VERSION" ]; then
+    echo "$PYTHON_VERSION"
+    return 0
+  fi
+
+  # Check .python-version (skip comments starting with #)
+  if [ -f "$BUILD_DIR/.python-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.python-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check runtime.txt
+  if [ -f "$BUILD_DIR/runtime.txt" ]; then
+    version=$(cat "$BUILD_DIR/runtime.txt" | \
+      sed -E 's/python-([0-9.]+)/\1/' | \
+      tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check uv.lock for requires-python (uv package manager)
+  if [ -f "$BUILD_DIR/uv.lock" ]; then
+    version=$(grep -E "^requires-python[[:space:]]*=" "$BUILD_DIR/uv.lock" | \
+      sed -E 's/.*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      # Normalize version constraint (e.g., ">=3.13" -> "3.13")
+      version=$(normalize_version_constraint "$version")
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check pyproject.toml for requires-python
+  if [ -f "$BUILD_DIR/pyproject.toml" ]; then
+    # First try requires-python in [project] section
+    version=$(grep -E "^requires-python[[:space:]]*=" "$BUILD_DIR/pyproject.toml" | \
+      sed -E 's/.*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      version=$(normalize_version_constraint "$version")
+      echo "$version"
+      return 0
+    fi
+
+    # Fall back to python = "..." format
+    version=$(grep -E "^python[[:space:]]*=" "$BUILD_DIR/pyproject.toml" | \
+      sed -E 's/.*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  # Use 3.12 for better package compatibility (many packages don't support 3.13 yet)
+  echo "3.12.8"
+  return 0
+}
+
+# Detect Go version
+detect_go_version() {
+  local version=""
+
+  # Check GO_VERSION environment variable first
+  if [ -n "$GO_VERSION" ]; then
+    echo "$GO_VERSION"
+    return 0
+  fi
+
+  # Check .go-version
+  if [ -f "$BUILD_DIR/.go-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.go-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check go.mod
+  if [ -f "$BUILD_DIR/go.mod" ]; then
+    version=$(grep -E "^go[[:space:]]+" "$BUILD_DIR/go.mod" | \
+      awk '{print $2}' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  echo "1.25.0"
+  return 0
+}
+
+# Detect PHP version
+detect_php_version() {
+  local version=""
+
+  # Check PHP_VERSION environment variable first
+  if [ -n "$PHP_VERSION" ]; then
+    echo "$PHP_VERSION"
+    return 0
+  fi
+
+  # Check .php-version
+  if [ -f "$BUILD_DIR/.php-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.php-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check composer.json
+  if [ -f "$BUILD_DIR/composer.json" ]; then
+    version=$(cat "$BUILD_DIR/composer.json" | \
+      grep -E '"php"[[:space:]]*:' | \
+      sed -E 's/.*"php"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      # Normalize composer version constraints to Docker-compatible versions
+      version=$(normalize_version_constraint "$version")
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  echo "8.3"
+  return 0
+}
+
+# Detect Java version
+detect_java_version() {
+  local version=""
+
+  # Check JAVA_VERSION environment variable first
+  if [ -n "$JAVA_VERSION" ]; then
+    echo "$JAVA_VERSION"
+    return 0
+  fi
+
+  # Check .java-version
+  if [ -f "$BUILD_DIR/.java-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.java-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check system.properties
+  if [ -f "$BUILD_DIR/system.properties" ]; then
+    version=$(grep -E "^java.runtime.version" "$BUILD_DIR/system.properties" | \
+      cut -d'=' -f2 | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check pom.xml
+  if [ -f "$BUILD_DIR/pom.xml" ]; then
+    version=$(grep -E "<java.version>|<maven.compiler.release>" "$BUILD_DIR/pom.xml" | \
+      head -1 | \
+      sed -E 's/.*>([0-9.]+)<.*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  echo "21"
+  return 0
+}
+
+# Detect .NET version
+detect_dotnet_version() {
+  local version=""
+
+  # Check DOTNET_VERSION environment variable first
+  if [ -n "$DOTNET_VERSION" ]; then
+    echo "$DOTNET_VERSION"
+    return 0
+  fi
+
+  # Check global.json
+  if [ -f "$BUILD_DIR/global.json" ]; then
+    version=$(cat "$BUILD_DIR/global.json" | \
+      grep -E '"version"[[:space:]]*:' | \
+      sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check project files for TargetFramework
+  local proj_file=$(find "$BUILD_DIR" -maxdepth 2 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null | head -1)
+  if [ -n "$proj_file" ]; then
+    version=$(grep -E "<TargetFramework>" "$proj_file" | \
+      sed -E 's/.*<TargetFramework>net([0-9.]+)<.*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  echo "8.0"
+  return 0
+}
+
+# Detect Rust version
+detect_rust_version() {
+  local version=""
+
+  # Check RUSTUP_TOOLCHAIN environment variable first
+  if [ -n "$RUSTUP_TOOLCHAIN" ]; then
+    echo "$RUSTUP_TOOLCHAIN"
+    return 0
+  fi
+
+  # Check rust-toolchain or rust-toolchain.toml
+  if [ -f "$BUILD_DIR/rust-toolchain" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/rust-toolchain" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  if [ -f "$BUILD_DIR/rust-toolchain.toml" ]; then
+    version=$(grep -E "^channel[[:space:]]*=" "$BUILD_DIR/rust-toolchain.toml" | \
+      sed -E 's/.*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default to 1.92.0 (stable tag doesn't exist on Docker Hub)
+  echo "1.92.0"
+  return 0
+}
+
+# Detect Elixir version
+detect_elixir_version() {
+  local version=""
+
+  # Check ELIXIR_VERSION environment variable first
+  if [ -n "$ELIXIR_VERSION" ]; then
+    echo "$ELIXIR_VERSION"
+    return 0
+  fi
+
+  # Check .elixir-version or .tool-versions
+  if [ -f "$BUILD_DIR/.elixir-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.elixir-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check .tool-versions (asdf convention)
+  if [ -f "$BUILD_DIR/.tool-versions" ]; then
+    version=$(grep -E "^elixir[[:space:]]+" "$BUILD_DIR/.tool-versions" | \
+      awk '{print $2}' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version if nothing specified
+  echo "1.18.4"
+  return 0
+}
+
+# Detect Erlang version (for Elixir)
+detect_erlang_version() {
+  local version=""
+
+  # Check ERLANG_VERSION environment variable first
+  if [ -n "$ERLANG_VERSION" ]; then
+    echo "$ERLANG_VERSION"
+    return 0
+  fi
+
+  # Check .erlang-version or .tool-versions
+  if [ -f "$BUILD_DIR/.erlang-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.erlang-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check .tool-versions (asdf convention)
+  if [ -f "$BUILD_DIR/.tool-versions" ]; then
+    version=$(grep -E "^erlang[[:space:]]+" "$BUILD_DIR/.tool-versions" | \
+      awk '{print $2}' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Return empty - will use default compatible with Elixir version
+  echo ""
+  return 0
+}
+
+# Detect Scala version
+detect_scala_version() {
+  local version=""
+
+  # Check SCALA_VERSION environment variable first
+  if [ -n "$SCALA_VERSION" ]; then
+    echo "$SCALA_VERSION"
+    return 0
+  fi
+
+  # Check .scala-version
+  if [ -f "$BUILD_DIR/.scala-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.scala-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check build.sbt for scalaVersion
+  if [ -f "$BUILD_DIR/build.sbt" ]; then
+    version=$(grep -E "scalaVersion[[:space:]]*:=" "$BUILD_DIR/build.sbt" | \
+      sed -E 's/.*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]' | \
+      head -1)
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check project/build.properties for scala.version
+  if [ -f "$BUILD_DIR/project/build.properties" ]; then
+    version=$(grep -E "^scala.version" "$BUILD_DIR/project/build.properties" | \
+      cut -d'=' -f2 | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default to Scala 3 (latest stable)
+  echo "3.5.2"
+  return 0
+}
+
+# Detect sbt version from project/build.properties
+detect_sbt_version() {
+  local version=""
+
+  # Check SBT_VERSION environment variable first
+  if [ -n "$SBT_VERSION" ]; then
+    echo "$SBT_VERSION"
+    return 0
+  fi
+
+  # Check project/build.properties for sbt.version
+  if [ -f "$BUILD_DIR/project/build.properties" ]; then
+    version=$(grep -E "^sbt.version" "$BUILD_DIR/project/build.properties" | \
+      cut -d'=' -f2 | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default to latest sbt 1.x
+  echo "1.10.6"
+  return 0
+}
+
+# Detect Deno version
+detect_deno_version() {
+  local version=""
+
+  # Check DENO_VERSION environment variable first
+  if [ -n "$DENO_VERSION" ]; then
+    echo "$DENO_VERSION"
+    return 0
+  fi
+
+  # Check .deno-version
+  if [ -f "$BUILD_DIR/.deno-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.deno-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check .dvmrc (deno version manager)
+  if [ -f "$BUILD_DIR/.dvmrc" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.dvmrc" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check deno.json for version hint
+  if [ -f "$BUILD_DIR/deno.json" ]; then
+    version=$(cat "$BUILD_DIR/deno.json" | \
+      grep -E '"version"[[:space:]]*:' | \
+      sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version
+  echo "2.6.1"
+  return 0
+}
+
+# Detect Clojure version
+detect_clojure_version() {
+  local version=""
+
+  # Check CLOJURE_VERSION environment variable first
+  if [ -n "$CLOJURE_VERSION" ]; then
+    echo "$CLOJURE_VERSION"
+    return 0
+  fi
+
+  # Check .clojure-version
+  if [ -f "$BUILD_DIR/.clojure-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.clojure-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check project.clj for Clojure version in dependencies
+  if [ -f "$BUILD_DIR/project.clj" ]; then
+    version=$(grep -E '\[org.clojure/clojure[[:space:]]+"' "$BUILD_DIR/project.clj" | \
+      sed -E 's/.*"([0-9.]+)".*/\1/' | \
+      tr -d '[:space:]' | \
+      head -1)
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check deps.edn for Clojure version
+  if [ -f "$BUILD_DIR/deps.edn" ]; then
+    version=$(grep -E 'org.clojure/clojure' "$BUILD_DIR/deps.edn" | \
+      grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | \
+      tr -d '"' | \
+      head -1)
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version
+  echo "1.11.1"
+  return 0
+}
+
+# Detect Leiningen version
+detect_lein_version() {
+  local version=""
+
+  # Check LEIN_VERSION environment variable first
+  if [ -n "$LEIN_VERSION" ]; then
+    echo "$LEIN_VERSION"
+    return 0
+  fi
+
+  # Check project.clj for min-lein-version
+  if [ -f "$BUILD_DIR/project.clj" ]; then
+    version=$(grep -E ':min-lein-version[[:space:]]+"' "$BUILD_DIR/project.clj" | \
+      sed -E 's/.*"([0-9.]+)".*/\1/' | \
+      tr -d '[:space:]' | \
+      head -1)
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default to latest Leiningen 2.x
+  echo "2.11.2"
+  return 0
+}
+
+# Detect Kotlin version
+detect_kotlin_version() {
+  local version=""
+
+  # Check KOTLIN_VERSION environment variable first
+  if [ -n "$KOTLIN_VERSION" ]; then
+    echo "$KOTLIN_VERSION"
+    return 0
+  fi
+
+  # Check .kotlin-version
+  if [ -f "$BUILD_DIR/.kotlin-version" ]; then
+    version=$(grep -v '^#' "$BUILD_DIR/.kotlin-version" | grep -v '^$' | head -1 | tr -d '[:space:]')
+    echo "$version"
+    return 0
+  fi
+
+  # Check gradle.properties for kotlin.version
+  if [ -f "$BUILD_DIR/gradle.properties" ]; then
+    version=$(grep -E "^kotlin.version" "$BUILD_DIR/gradle.properties" | \
+      cut -d'=' -f2 | \
+      tr -d '[:space:]')
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Check build.gradle.kts for kotlin version
+  if [ -f "$BUILD_DIR/build.gradle.kts" ]; then
+    version=$(grep -E "kotlin\(.*\).*version[[:space:]]*\"" "$BUILD_DIR/build.gradle.kts" | \
+      sed -E 's/.*version[[:space:]]*"([^"]+)".*/\1/' | \
+      tr -d '[:space:]' | \
+      head -1)
+
+    if [ -n "$version" ]; then
+      echo "$version"
+      return 0
+    fi
+  fi
+
+  # Default version
+  echo "2.1.0"
+  return 0
+}
+
+# Main version detection
+LANGUAGE=${LANGUAGE:-""}
+
+case "$LANGUAGE" in
+  nodejs|node|Node.js)
+    detect_node_version
+    ;;
+  bun|Bun)
+    detect_bun_version
+    ;;
+  deno|Deno)
+    detect_deno_version
+    ;;
+  ruby|Ruby)
+    detect_ruby_version
+    ;;
+  python|Python)
+    detect_python_version
+    ;;
+  go|Go|golang)
+    detect_go_version
+    ;;
+  rust|Rust)
+    detect_rust_version
+    ;;
+  scala|Scala)
+    detect_scala_version
+    ;;
+  clojure|Clojure)
+    detect_clojure_version
+    ;;
+  kotlin|Kotlin)
+    detect_kotlin_version
+    ;;
+  elixir|Elixir)
+    detect_elixir_version
+    erlang_ver=$(detect_erlang_version)
+    if [ -n "$erlang_ver" ]; then
+      echo "$erlang_ver" >&2
+    fi
+    ;;
+  erlang|Erlang)
+    detect_erlang_version
+    ;;
+  php|PHP)
+    detect_php_version
+    ;;
+  java|Java|maven|gradle)
+    detect_java_version
+    ;;
+  dotnet|.net|.NET|csharp)
+    detect_dotnet_version
+    ;;
+  *)
+    # If no language specified, try to detect all versions
+    if [ -f "$BUILD_DIR/package.json" ] || [ -f "$BUILD_DIR/.nvmrc" ] || [ -f "$BUILD_DIR/.node-version" ]; then
+      echo "NODE_VERSION=$(detect_node_version)"
+    fi
+    if [ -f "$BUILD_DIR/bun.lockb" ] || [ -f "$BUILD_DIR/bunfig.toml" ]; then
+      echo "BUN_VERSION=$(detect_bun_version)"
+    fi
+    if [ -f "$BUILD_DIR/deno.json" ] || [ -f "$BUILD_DIR/deno.jsonc" ]; then
+      echo "DENO_VERSION=$(detect_deno_version)"
+    fi
+    if [ -f "$BUILD_DIR/Gemfile" ] || [ -f "$BUILD_DIR/.ruby-version" ]; then
+      echo "RUBY_VERSION=$(detect_ruby_version)"
+    fi
+    if [ -f "$BUILD_DIR/requirements.txt" ] || [ -f "$BUILD_DIR/.python-version" ]; then
+      echo "PYTHON_VERSION=$(detect_python_version)"
+    fi
+    if [ -f "$BUILD_DIR/go.mod" ] || [ -f "$BUILD_DIR/.go-version" ]; then
+      echo "GO_VERSION=$(detect_go_version)"
+    fi
+    if [ -f "$BUILD_DIR/Cargo.toml" ] || [ -f "$BUILD_DIR/rust-toolchain" ]; then
+      echo "RUST_VERSION=$(detect_rust_version)"
+    fi
+    if [ -f "$BUILD_DIR/build.sbt" ] || [ -f "$BUILD_DIR/build.sc" ]; then
+      echo "SCALA_VERSION=$(detect_scala_version)"
+    fi
+    if [ -f "$BUILD_DIR/project.clj" ] || [ -f "$BUILD_DIR/deps.edn" ]; then
+      echo "CLOJURE_VERSION=$(detect_clojure_version)"
+    fi
+    if [ -f "$BUILD_DIR/settings.gradle.kts" ] || [ -f "$BUILD_DIR/build.gradle.kts" ]; then
+      echo "KOTLIN_VERSION=$(detect_kotlin_version)"
+    fi
+    if [ -f "$BUILD_DIR/mix.exs" ] || [ -f "$BUILD_DIR/.elixir-version" ]; then
+      echo "ELIXIR_VERSION=$(detect_elixir_version)"
+      erlang_ver=$(detect_erlang_version)
+      if [ -n "$erlang_ver" ]; then
+        echo "ERLANG_VERSION=$erlang_ver"
+      fi
+    fi
+    if [ -f "$BUILD_DIR/composer.json" ] || [ -f "$BUILD_DIR/.php-version" ]; then
+      echo "PHP_VERSION=$(detect_php_version)"
+    fi
+    if [ -f "$BUILD_DIR/pom.xml" ] || [ -f "$BUILD_DIR/build.gradle" ]; then
+      echo "JAVA_VERSION=$(detect_java_version)"
+    fi
+    ;;
+esac

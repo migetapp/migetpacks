@@ -1,0 +1,264 @@
+---
+title: "Docker Hardened Images"
+description: "Build secure, minimal containers using Docker Hardened Images (DHI) with distroless runtime environments."
+---
+
+## Overview
+
+Docker Hardened Images (DHI) from `dhi.io` provide secure, CVE-free base images with minimal attack surfaces. When enabled, migetpacks uses DHI images for both the build stage (`-dev` variants with shell) and the runtime stage (distroless, no shell).
+
+## Enabling DHI
+
+Set `USE_DHI=true` to enable Docker Hardened Images:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+## Registry Authentication
+
+The `dhi.io` registry requires authentication. How you provide credentials depends on your environment.
+
+### CI/CD Environments (GitHub Actions, GitLab CI)
+
+In CI/CD pipelines, credentials are typically available via secrets. The easiest approach is to pass them as environment variables:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:latest \
+  -e USE_DHI=true \
+  -e DHI_USERNAME=$DHI_USERNAME \
+  -e DHI_PASSWORD=$DHI_PASSWORD \
+  miget/migetpacks:latest
+```
+
+Or create a Docker config file with credentials and mount it:
+
+```yaml
+# GitHub Actions example
+- name: Create DHI auth config
+  run: |
+    mkdir -p /tmp/docker-config
+    echo '{"auths":{"dhi.io":{"auth":"'$(echo -n "${{ secrets.DHI_USERNAME }}:${{ secrets.DHI_PASSWORD }}" | base64)'"}}}' > /tmp/docker-config/config.json
+
+- name: Build with DHI
+  run: |
+    docker run --rm \
+      -v $(pwd):/workspace/source:ro \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v /tmp/docker-config/config.json:/root/.docker/config.json:ro \
+      -e OUTPUT_IMAGE=my-app:latest \
+      -e USE_DHI=true \
+      miget/migetpacks:latest
+```
+
+### Local Development (Docker Desktop)
+
+Docker Desktop on Mac and Windows stores credentials in the system keychain (`credsStore: desktop`), not in `~/.docker/config.json`. When you run `docker login dhi.io`, the credentials are stored in the keychain, but the migetpacks container cannot access them.
+
+Extract the credentials from the keychain and pass them as environment variables:
+
+```bash
+# Extract credentials from Docker Desktop keychain
+DHI_USERNAME=$(echo "dhi.io" | docker-credential-desktop get | jq -r '.Username')
+DHI_PASSWORD=$(echo "dhi.io" | docker-credential-desktop get | jq -r '.Secret')
+
+# Build with DHI
+docker run --rm \
+  -v "$(pwd):/workspace/source:ro" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e ARCH=arm64 \
+  -e USE_DHI=true \
+  -e DHI_USERNAME="$DHI_USERNAME" \
+  -e DHI_PASSWORD="$DHI_PASSWORD" \
+  miget/migetpacks:latest
+```
+
+<Tip>
+Add this to your shell profile (`.bashrc` or `.zshrc`) for convenience:
+
+```bash
+alias migetpacks-dhi='DHI_USERNAME=$(echo "dhi.io" | docker-credential-desktop get | jq -r ".Username") DHI_PASSWORD=$(echo "dhi.io" | docker-credential-desktop get | jq -r ".Secret") docker run --rm -v "$(pwd):/workspace/source:ro" -v /var/run/docker.sock:/var/run/docker.sock -e USE_DHI=true -e DHI_USERNAME="$DHI_USERNAME" -e DHI_PASSWORD="$DHI_PASSWORD"'
+```
+
+Then use: `migetpacks-dhi -e OUTPUT_IMAGE=my-app:local miget/migetpacks:latest`
+</Tip>
+
+### Linux
+
+On Linux, credentials are typically stored directly in `~/.docker/config.json` after running `docker login dhi.io`. Mount this file:
+
+```bash
+docker run --rm \
+  -v "$(pwd):/workspace/source:ro" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.docker/config.json:/root/.docker/config.json:ro \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+If you're using a credential helper (like `pass` or `secretservice`), extract credentials and pass them as environment variables:
+
+```bash
+# For pass credential helper
+DHI_USERNAME=$(echo "dhi.io" | docker-credential-pass get | jq -r '.Username')
+DHI_PASSWORD=$(echo "dhi.io" | docker-credential-pass get | jq -r '.Secret')
+
+# For secretservice credential helper
+DHI_USERNAME=$(echo "dhi.io" | docker-credential-secretservice get | jq -r '.Username')
+DHI_PASSWORD=$(echo "dhi.io" | docker-credential-secretservice get | jq -r '.Secret')
+```
+
+### Kubernetes/Shipwright
+
+When running migetpacks in Kubernetes via Shipwright, use an `imagePullSecret` containing your DHI credentials:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dhi-credentials
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: <base64-encoded-docker-config>
+```
+
+Then reference it in your ClusterBuildStrategy or Build resource.
+
+## Image Variants
+
+<Tabs>
+  <Tab title="Build Images (-dev)">
+    The `-dev` variants include:
+    - Shell (`/bin/sh`)
+    - Package manager (`apt-get`)
+    - Build tools (compilers, headers)
+
+    Used during the build stage for installing dependencies and compiling code.
+  </Tab>
+  <Tab title="Runtime Images (distroless)">
+    The runtime variants are distroless:
+    - No shell
+    - No package manager
+    - No unnecessary binaries
+    - Minimal attack surface
+    - Non-root user: `nonroot`
+
+    Used for the final container that runs in production.
+  </Tab>
+</Tabs>
+
+## Supported Languages
+
+| Language | Build Image | Runtime Image | Notes |
+|----------|-------------|---------------|-------|
+| Node.js | `dhi.io/node:{version}-dev` | `dhi.io/node:{version}` | Distroless runtime |
+| Deno | `dhi.io/deno:{version}-dev` | `dhi.io/deno:{version}` | Requires 2.6.4+ |
+| Bun | `dhi.io/bun:{version}-dev` | `dhi.io/bun:{version}` | Requires 1.3.6+ |
+| Ruby | `dhi.io/ruby:{version}-dev` | `dhi.io/ruby:{version}` | Libraries copied from builder |
+| Python | `dhi.io/python:{version}-dev` | `dhi.io/python:{version}` | Distroless runtime |
+| Go | `dhi.io/golang:{version}-dev` | `dhi.io/golang:{version}` | Requires 1.22+ |
+| Rust | `dhi.io/rust:{version}-dev` | `dhi.io/rust:{version}` | Distroless runtime |
+| Java | `dhi.io/eclipse-temurin:{version}-jdk-dev` | `dhi.io/eclipse-temurin:{version}` | Maven/Gradle installed in builder |
+| Kotlin | `dhi.io/eclipse-temurin:{version}-jdk-dev` | `dhi.io/eclipse-temurin:{version}` | Reads system.properties |
+| Scala | `sbtscala/scala-sbt:...` (official) | `dhi.io/eclipse-temurin:{java}` | Official build, DHI runtime |
+| Clojure | `clojure:temurin-{java}-lein` (official) | `dhi.io/eclipse-temurin:{java}` | Official build, DHI runtime |
+| .NET | `dhi.io/dotnet:{version}-sdk` | `dhi.io/aspnetcore:{version}` | Distroless runtime |
+
+<Warning>
+**Not supported with DHI:**
+- **PHP** - FrankenPHP is a specialized server that requires official FrankenPHP images
+- **Elixir** - Uses official Elixir images (no DHI equivalent available)
+</Warning>
+
+## DHI Mirror
+
+If you have a private mirror for DHI images (e.g., behind a firewall), use `DHI_MIRROR`:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e USE_DHI=true \
+  -e DHI_MIRROR=https://registry.example.io/dhi-io \
+  miget/migetpacks:latest
+```
+
+## Deployment Considerations
+
+Distroless containers have important behavioral differences from traditional containers.
+
+### No Shell Available
+
+Commands cannot use shell features like pipes, variable expansion, or shebangs:
+
+<CodeGroup>
+```bash Standard (with shell)
+CMD ["sh", "-c", "node server.js --port ${PORT:-5000}"]
+```
+
+```bash DHI (exec format)
+CMD ["node", "server.js", "--port", "5000"]
+```
+</CodeGroup>
+
+<Note>
+Shell variables like `${PORT:-5000}` must be pre-expanded to literal values. migetpacks handles this automatically during Dockerfile generation.
+</Note>
+
+### Ruby-Specific Considerations
+
+Ruby scripts with shebangs (`#!/usr/bin/env ruby`) do not work in distroless containers:
+
+- Process commands are transformed: `./bin/rails` becomes `ruby bin/rails`
+- `BUNDLER_VERSION` is set from `Gemfile.lock` to prevent bundler auto-switching (which requires `/usr/bin/env`)
+- Native gem shared libraries (`.so` files) are copied from the builder stage
+- PATH includes `/app/bin:/app/vendor/bundle/bin`
+
+### Java-Specific Considerations
+
+- Eclipse Temurin JDK images do not include Maven or Gradle
+- Build tools are installed via `apt-get` in the builder stage
+- Runtime uses distroless JRE (no JDK)
+- Version normalization applies: `1.8` becomes `8`, `1.11` becomes `11`
+
+### Go Version Requirements
+
+Go DHI images require version 1.22 or newer, with minimum patch versions:
+- Go 1.22.12+
+- Go 1.23.7+
+- Go 1.24.1+
+
+### Result JSON
+
+When using DHI, the build result JSON includes `_shell: false` to signal that the container is distroless:
+
+```json
+{
+  "status": "success",
+  "images": [
+    {"name": "registry.io/my-app", "ports": ["5000/tcp"]}
+  ],
+  "_shell": false
+}
+```
+
+This can be used by deployment systems to adjust health check and exec strategies.
+
+## Multi-Buildpack with DHI
+
+<Warning>
+When using `BUILDPACKS` with `USE_DHI=true`, only the primary language runtime is available in the final distroless container. Secondary buildpacks work during the build stage but their runtimes are not included in the runtime image.
+
+This is acceptable when secondary buildpacks produce build artifacts (e.g., Node.js compiling frontend assets) rather than running at runtime.
+</Warning>

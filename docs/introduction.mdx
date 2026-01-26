@@ -1,0 +1,127 @@
+---
+title: "migetpacks"
+description: "Zero-config container builds for any language"
+---
+
+<div style={{ textAlign: 'center', marginBottom: '2rem' }}>
+  <h2>Zero-config, secure, production-ready containers</h2>
+  <p>Drop in your source code and get an optimized, non-root container image. No Dockerfile to write or maintain.</p>
+</div>
+
+```bash
+docker pull miget/migetpacks:latest
+```
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="Zero Config" icon="wand-magic-sparkles">
+    Auto-detects **14 languages** and their versions from your source code. No Dockerfile, no buildpacks config, no CI scripts to maintain.
+  </Card>
+  <Card title="Secure by Default" icon="shield-halved">
+    Optional **Docker Hardened Images** (distroless), non-root runtime user, minimal attack surface, and no shell in production containers.
+  </Card>
+  <Card title="Fast Builds" icon="bolt">
+    Optimized **layer caching**, registry mirrors, shared package manager caches, and BuildKit for parallel stage execution.
+  </Card>
+  <Card title="Production Ready" icon="rocket">
+    Native **Shipwright** integration, GitHub Actions support, result JSON for CI/CD pipelines, and multi-architecture builds.
+  </Card>
+</CardGroup>
+
+## Why migetpacks
+
+Unlike other build systems, migetpacks uses the same official Docker Hub images you already know (`node:20`, `python:3.12`, `ruby:3.2`), not custom stacks or proprietary base layers. This means:
+
+- **Familiar images.** Your production container runs on the same upstream image you'd pick yourself.
+- **Transparent builds.** migetpacks generates a real multi-stage Dockerfile you can read, debug, and take with you.
+- **One flag for distroless.** Set `USE_DHI=true` to switch to Docker Hardened Images (dhi.io) with zero config changes.
+
+## Quick Start
+
+<Steps>
+  <Step title="Pull migetpacks">
+    ```bash
+    docker pull miget/migetpacks:latest
+    ```
+  </Step>
+  <Step title="Build your app">
+    ```bash
+    # From your project directory
+    docker run --rm \
+      -v $PWD:/workspace/source \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e OUTPUT_IMAGE=my-app:local \
+      miget/migetpacks:latest
+
+    # Or with an explicit path
+    docker run --rm \
+      -v /path/to/your/app:/workspace/source \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e OUTPUT_IMAGE=my-app:local \
+      miget/migetpacks:latest
+    ```
+  </Step>
+  <Step title="Deploy">
+    ```bash
+    docker run --rm -p 5000:5000 my-app:local
+    ```
+  </Step>
+</Steps>
+
+## Supported Languages
+
+<CardGroup cols={4}>
+  <Card title="Node.js" icon="node-js" href="/languages/nodejs">
+    npm, yarn, pnpm
+  </Card>
+  <Card title="Deno" icon="dinosaur" href="/languages/deno">
+    deno.json, deps.ts
+  </Card>
+  <Card title="Bun" icon="bread-slice" href="/languages/bun">
+    bun.lockb, bunfig.toml
+  </Card>
+  <Card title="Python" icon="python" href="/languages/python">
+    pip, uv, poetry
+  </Card>
+  <Card title="Ruby" icon="gem" href="/languages/ruby">
+    Bundler, Rails
+  </Card>
+  <Card title="Go" icon="golang" href="/languages/go">
+    go.mod, go.sum
+  </Card>
+  <Card title="Rust" icon="rust" href="/languages/rust">
+    Cargo.toml
+  </Card>
+  <Card title="PHP" icon="php" href="/languages/php">
+    Composer, FrankenPHP
+  </Card>
+  <Card title="Java" icon="java" href="/languages/java">
+    Maven, Gradle
+  </Card>
+  <Card title="Kotlin" icon="k" href="/languages/kotlin">
+    Gradle, Maven
+  </Card>
+  <Card title="Scala" icon="s" href="/languages/scala">
+    sbt, Play Framework
+  </Card>
+  <Card title="Clojure" icon="c" href="/languages/clojure">
+    Leiningen
+  </Card>
+  <Card title=".NET" icon="microsoft" href="/languages/dotnet">
+    C#, F#, ASP.NET
+  </Card>
+  <Card title="Elixir" icon="droplet" href="/languages/elixir">
+    Mix, Phoenix
+  </Card>
+</CardGroup>
+
+---
+
+Already have a Dockerfile? migetpacks supports [custom Dockerfiles](/guides/custom-dockerfile) and [Docker Compose](/guides/docker-compose) projects too.
+
+---
+
+<div style={{ textAlign: 'center', marginTop: '2rem', color: 'var(--text-secondary)' }}>
+  Built by <a href="https://miget.com">miget.com</a> — Unlimited apps, one price.
+</div>

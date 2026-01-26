@@ -1,0 +1,11 @@
+{
+  "name": "miget/php-hello-world",
+  "description": "A sample PHP app for Migetpacks",
+  "type": "project",
+  "require": {
+    "php": ">=8.2",
+    "ext-mbstring": "*",
+    "ext-json": "*"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,145 @@
+---
+title: "Bun"
+description: "Build and deploy Bun applications with optimized dependency caching."
+---
+
+## Detection
+
+migetpacks detects Bun when any of these signals are present:
+
+| Priority | Signal |
+|----------|--------|
+| 1 | `bun.lock` or `bun.lockb` (lockfiles) |
+| 2 | `bunfig.toml` (config file) |
+| 3 | `.bun-version` (version file) |
+| 4 | `bun-types` in `package.json` dependencies |
+
+<Note>
+Bun detection runs after backend frameworks (Ruby, Python, Go, etc.) but before Node.js. If your project has both a `bun.lock` and a `Gemfile`, it will be detected as Ruby with Bun available as a secondary buildpack.
+</Note>
+
+## Version Detection
+
+Bun version is resolved in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `BUN_VERSION` env var | `BUN_VERSION=1.3.4` |
+| 2 | `.bun-version` file | `1.3.4` |
+| 3 | `version` in `bunfig.toml` | `version = "1.3.4"` |
+| 4 | Default | `1.3.4` |
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile optimized for Bun:
+
+```dockerfile
+# Builder stage
+FROM oven/bun:1.3.4 AS builder
+WORKDIR /build
+
+# Layer 1: Copy dependency files (cached if lockfile unchanged)
+COPY package.json bun.lock ./
+
+# Layer 2: Install dependencies
+RUN bun install
+
+# Layer 3: Copy source code
+COPY . .
+
+# Layer 4: Run build script (if present)
+RUN bun run build
+
+# Runtime stage
+FROM oven/bun:1.3.4-slim
+WORKDIR /app
+COPY --from=builder /build /app
+```
+
+### Entry Point Detection
+
+The entry point is automatically detected in this order:
+
+1. `.ts`/`.js` file referenced in `scripts.start` of `package.json`
+2. Common file patterns: `index.ts`, `server.ts`, `app.ts`, `main.ts`, `src/index.ts`, `src/server.ts`, `index.js`, `server.js`
+3. Falls back to `index.ts`
+
+### Build Script
+
+If `package.json` contains a `"build"` script, `bun run build` is automatically executed after dependency installation. You can override this with the `BUILD_COMMAND` environment variable.
+
+### Lockfile Format
+
+Bun supports two lockfile formats:
+- `bun.lock` (text-based, newer format)
+- `bun.lockb` (binary, legacy format)
+
+Both are automatically detected and copied during the build.
+
+## Run Command
+
+The default run command is determined in this order:
+
+| Priority | Source | Command |
+|----------|--------|---------|
+| 1 | `RUN_COMMAND` env var | User-specified |
+| 2 | `web:` in Procfile | From Procfile |
+| 3 | Default | `bun run {entrypoint}` |
+
+The entry point is detected automatically (see Entry Point Detection above).
+
+## Caching
+
+### Docker Layer Caching
+
+Dependencies are installed in a separate layer before source code is copied. `bun install` is only re-run when `package.json` or `bun.lock`/`bun.lockb` changes.
+
+### BuildKit Cache Mounts
+
+When `BUILD_CACHE_DIR` is configured, BuildKit cache mounts are used:
+
+| Cache Path | Contents |
+|-----------|----------|
+| `/cache/bun` | Bun install cache (`~/.bun/install/cache`) |
+
+### Registry Cache
+
+Use `CACHE_IMAGE` to push/pull BuildKit inline cache layers to a registry for cross-build caching.
+
+## DHI Support
+
+<Check>Bun is supported with Docker Hardened Images (requires version 1.3.6 or later).</Check>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/bun:{version}-dev` |
+| Runtime | `dhi.io/bun:{version}` |
+
+<Warning>
+DHI images for Bun are only available starting from version 1.3.6. If your project uses an older version, migetpacks will fall back to the standard `oven/bun` images.
+</Warning>
+
+The `-dev` variant includes a shell for building. The runtime image is distroless with no shell, providing a minimal attack surface.
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-bun-app:latest \
+  miget/migetpacks:latest
+```
+
+### With Custom Options
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/app:v1 \
+  -e BUN_VERSION=1.3.4 \
+  -e BUILD_COMMAND="bun run build:prod" \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```

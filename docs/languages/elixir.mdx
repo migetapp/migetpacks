@@ -1,0 +1,225 @@
+---
+title: "Elixir"
+description: "Build and deploy Elixir and Phoenix applications with migetpacks."
+---
+
+## Detection
+
+migetpacks detects an Elixir application when either of the following files is present in the project root:
+
+- `mix.exs`
+- `mix.lock`
+
+## Version Detection
+
+### Elixir Version
+
+Elixir version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `.elixir-version` | `1.18.4` |
+| `.tool-versions` (asdf) | `elixir 1.18.4` |
+| Default | `1.18.4` |
+
+### Erlang/OTP Version
+
+Erlang version is resolved from:
+
+| Source | Example |
+|--------|---------|
+| `.erlang-version` | `27.0` |
+| `.tool-versions` (asdf) | `erlang 27.0` |
+| Default | Auto-compatible with Elixir version |
+
+<Note>
+If no Erlang version is specified, the Elixir Docker image's bundled Erlang/OTP version is used, which is guaranteed to be compatible.
+</Note>
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile using official Elixir images:
+
+```dockerfile
+# Build stage
+FROM elixir:1.18.4 AS builder
+WORKDIR /build
+
+# Elixir build environment
+ENV MIX_ENV=prod
+ENV ERL_FLAGS="-noinput"
+
+# Layer caching: copy dependency files first
+COPY mix.exs mix.lock* ./
+COPY config ./config/
+
+# Install Hex, Rebar, and fetch dependencies
+RUN mix local.hex --force \
+    && mix local.rebar --force \
+    && mix deps.get --only prod
+
+# Compile dependencies separately
+RUN mix deps.compile
+
+# Copy source code
+COPY . .
+
+# Compile and build release
+RUN mix compile
+RUN mix release
+
+# Runtime stage
+FROM elixir:1.18.4-slim
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+### Phoenix Framework Detection
+
+If `mix.exs` contains a `:phoenix` dependency, migetpacks automatically:
+
+1. Copies `config/` early (needed for dependency compilation)
+2. Compiles assets using `mix assets.deploy` (or falls back to npm-based asset pipeline)
+3. Runs `mix phx.digest` for static file fingerprinting
+
+```dockerfile
+# Phoenix asset compilation
+RUN mix compile
+RUN if [ -d "assets" ]; then \
+      mix assets.deploy 2>/dev/null || \
+      (cd assets && npm install && npm run deploy && cd .. && mix phx.digest); \
+    fi
+```
+
+### Umbrella Project Detection
+
+If an `apps/` directory exists, migetpacks detects an umbrella project and copies child `mix.exs` files for proper dependency resolution.
+
+### Mix Releases
+
+migetpacks detects if the project uses [Mix releases](https://hexdocs.pm/mix/Mix.Tasks.Release.html) by checking for `releases:` in `mix.exs`. When releases are used:
+
+- The release binary is self-contained (no Hex/Mix needed at runtime)
+- The runtime image is slimmer
+- The run command uses the release binary
+
+When releases are **not** used:
+
+- Hex and Mix are copied to the runtime image
+- Git is installed at runtime (needed for git dependency verification)
+- `mix phx.server` is used as the run command
+
+## Run Command
+
+The default run command depends on whether Mix releases are configured:
+
+| Configuration | Default Command |
+|--------------|----------------|
+| With releases | `/app/bin/{app_name} start` |
+| Without releases (Phoenix) | `mix phx.server` |
+| Without releases (plain) | `mix run --no-halt` |
+
+Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: /app/bin/myapp start
+worker: /app/bin/myapp eval "MyApp.Worker.start()"
+```
+
+### Runtime Configuration
+
+| Variable | Value |
+|----------|-------|
+| `MIX_ENV` | `prod` |
+| `HOME` | `/home/miget` |
+
+## Caching
+
+### Layer Caching
+
+Dependencies are cached by copying `mix.exs` and `mix.lock` before the full source:
+
+| Cached Files | Purpose |
+|-------------|---------|
+| `mix.exs` | Project definition with dependencies |
+| `mix.lock` | Locked dependency versions |
+| `config/` | Configuration (Phoenix needs this for deps.compile) |
+
+| Scenario | Dependency Install |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | **Cached** |
+| mix.exs/mix.lock change | Runs |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, Hex and Mix dependency caches persist at:
+
+| Cache Path | Contents |
+|------------|----------|
+| hex cache | Hex packages |
+| mix cache | Mix dependencies and compiled artifacts |
+
+## DHI Support
+
+<Warning>
+Docker Hardened Images (DHI) are **not supported** for Elixir. Official Elixir images are used for both build and runtime stages.
+</Warning>
+
+When `USE_DHI=true` is set, migetpacks will display a warning and continue using the official Elixir images:
+
+| Stage | Image |
+|-------|-------|
+| Build | `elixir:{version}` |
+| Runtime | `elixir:{version}-slim` |
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/elixir-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-elixir-app:latest \
+  miget/migetpacks:latest
+```
+
+### Phoenix application
+
+```bash
+docker run --rm \
+  -v /path/to/phoenix-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-phoenix-app:latest \
+  miget/migetpacks:latest
+```
+
+### Running Phoenix
+
+Phoenix requires `SECRET_KEY_BASE` at runtime. Generate one with `mix phx.gen.secret` or `openssl rand -hex 64`:
+
+```bash
+docker run -p 5000:5000 \
+  -e SECRET_KEY_BASE=$(openssl rand -hex 64) \
+  my-phoenix-app:latest
+```
+
+For production with a database:
+
+```bash
+docker run -p 5000:5000 \
+  -e SECRET_KEY_BASE=your-production-secret-key \
+  -e DATABASE_URL=ecto://user:pass@host/db \
+  my-phoenix-app:latest
+```
+
+### With build cache
+
+```bash
+docker run --rm \
+  -v /path/to/elixir-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/build-cache:/cache \
+  -e OUTPUT_IMAGE=my-elixir-app:latest \
+  -e BUILD_CACHE_DIR=/cache \
+  miget/migetpacks:latest
+```

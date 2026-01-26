@@ -1,0 +1,176 @@
+---
+title: "Node.js"
+description: "Build and deploy Node.js applications with automatic package manager detection."
+---
+
+## Detection
+
+migetpacks detects Node.js when any of these files are present in your project root:
+
+- `package.json`
+- `package-lock.json`
+- `yarn.lock`
+- `pnpm-lock.yaml`
+
+### Package Manager Detection
+
+The package manager is detected from lockfiles first, then from the `packageManager` field in `package.json`:
+
+| Priority | Signal | Result |
+|----------|--------|--------|
+| 1 | `pnpm-lock.yaml` exists | pnpm |
+| 2 | `yarn.lock` exists | yarn |
+| 3 | `package-lock.json` exists | npm |
+| 4 | `packageManager` field in `package.json` | npm, yarn, or pnpm |
+| 5 | `package.json` exists (no lockfile) | npm |
+
+<Warning>
+If multiple lockfiles are detected (e.g., both `yarn.lock` and `package-lock.json`), migetpacks will warn you and use the highest-priority lockfile. Remove unused lockfiles to avoid confusion.
+</Warning>
+
+## Version Detection
+
+Node.js version is resolved in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `NODE_VERSION` env var | `NODE_VERSION=20` |
+| 2 | `.node-version` file | `22.16.0` |
+| 3 | `.nvmrc` file | `20` |
+| 4 | `engines.node` in `package.json` | `">=20"` |
+| 5 | Default | `22.16.0` |
+
+Version constraints are normalized for Docker compatibility:
+- `20.x` becomes `20`
+- `>=18` becomes `18`
+- `^20.0.0` becomes `20.0`
+- `20.x || 22.x || 24.x` becomes `24` (highest major)
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile optimized for layer caching:
+
+```dockerfile
+# Builder stage
+FROM node:22 AS builder
+WORKDIR /build
+
+# Layer 1: Copy dependency files (cached if lockfiles unchanged)
+COPY package.json package-lock.json ./
+ENV NODE_ENV=production
+
+# Layer 2: Install dependencies (CACHED when only source code changes)
+RUN npm ci
+
+# Layer 3: Copy source code
+COPY . .
+
+# Layer 4: Build and prune
+RUN npm run build \
+    && npm prune --production \
+    && rm -rf .git .github test tests spec __tests__ coverage .nyc_output .cache
+
+# Runtime stage
+FROM node:22-slim
+WORKDIR /app
+COPY --from=builder /build /app
+ENV NODE_ENV=production
+```
+
+### Package Manager Commands
+
+| Manager | Install | Prune |
+|---------|---------|-------|
+| npm | `npm ci` (or `npm install`) | `npm prune --production` |
+| yarn | `yarn install --frozen-lockfile` | `yarn install --production --frozen-lockfile --ignore-scripts` |
+| pnpm | `pnpm install --frozen-lockfile` | `pnpm prune --prod` |
+
+### Build Script
+
+If `package.json` contains a `"build"` script, it is automatically executed after dependency installation. You can override this with the `BUILD_COMMAND` environment variable.
+
+### Runtime Cleanup
+
+The following directories are removed from the final image:
+
+- `.git/`, `.github/`
+- `test/`, `tests/`, `spec/`, `__tests__/`
+- `coverage/`, `.nyc_output/`, `.cache/`
+
+## Run Command
+
+The default run command is determined in this order:
+
+| Priority | Source | Command |
+|----------|--------|---------|
+| 1 | `RUN_COMMAND` env var | User-specified |
+| 2 | `web:` in Procfile | From Procfile |
+| 3 | `scripts.start` in `package.json` | `npm start` |
+| 4 | Default | `node index.js` |
+
+## Caching
+
+### Docker Layer Caching
+
+Dependencies are installed in a separate layer before source code is copied. This means `npm ci` is only re-run when `package.json` or `package-lock.json` changes.
+
+### BuildKit Cache Mounts
+
+When `BUILD_CACHE_DIR` is configured, BuildKit cache mounts are used for package manager caches:
+
+| Manager | Cache Path |
+|---------|-----------|
+| npm | `/cache/npm` |
+| yarn | `/cache/yarn` |
+| pnpm | `/cache/pnpm` |
+
+### Registry Cache
+
+Use `CACHE_IMAGE` to push/pull BuildKit inline cache layers to a registry for cross-build caching.
+
+## DHI Support
+
+<Check>Node.js is fully supported with Docker Hardened Images.</Check>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/node:{version}-dev` |
+| Runtime | `dhi.io/node:{version}` |
+
+The `-dev` variant includes a shell and package manager for building. The runtime image is distroless with no shell, providing a minimal attack surface.
+
+<Note>
+DHI runtime images run as the `node` user (non-root). Commands must use exec format since there is no `/bin/sh` available.
+</Note>
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-node-app:latest \
+  miget/migetpacks:latest
+```
+
+### With Custom Options
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/app:v1 \
+  -e NODE_VERSION=20 \
+  -e BUILD_COMMAND="npm run build:prod" \
+  -e NODE_OPTIONS="--max-old-space-size=4096" \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+### Environment Variables
+
+Any environment variable not recognized by migetpacks is automatically injected into the generated Dockerfile. Common Node.js variables:
+
+- `NODE_OPTIONS` - Node.js runtime options (e.g., `--max-old-space-size=4096`)
+- `VITE_*` - Vite build-time variables
+- `NEXT_PUBLIC_*` - Next.js public environment variables

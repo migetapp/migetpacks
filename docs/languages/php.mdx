@@ -1,0 +1,159 @@
+---
+title: "PHP"
+description: "Build and deploy PHP applications with migetpacks using FrankenPHP."
+---
+
+## Detection
+
+migetpacks detects a PHP application when any of the following files are present in the project root:
+
+- `composer.json`
+- `index.php`
+
+## Version Detection
+
+PHP version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `.php-version` | `8.3` |
+| `composer.json` (`require.php`) | `"php": ">=8.2"` |
+| Default | `8.3` |
+
+Version constraints from `composer.json` (e.g., `>=8.2`, `^8.3`) are normalized to Docker-compatible versions.
+
+<Note>
+FrankenPHP supports PHP 8.2, 8.3, and 8.4. Older versions will fall back to PHP 8.2 with a warning.
+</Note>
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile using [FrankenPHP](https://frankenphp.dev/) (a modern PHP application server built on Go and Caddy):
+
+```dockerfile
+# Build stage
+FROM dunglas/frankenphp:builder-php8.3 AS builder
+WORKDIR /build
+
+# Install PHP extensions detected from composer.json
+RUN apt-get update && apt-get install -y ... \
+    && docker-php-ext-install pdo_pgsql gd ...
+
+# Layer caching: copy dependency files first
+COPY composer.json composer.lock* ./
+
+# Install Composer and dependencies (cached if lockfiles unchanged)
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+    && composer install --no-dev --optimize-autoloader --no-scripts
+
+# Copy source code
+COPY . .
+
+# Runtime stage
+FROM dunglas/frankenphp:php8.3
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+### PHP Extension Detection
+
+Extensions declared in `composer.json` under `require` with the `ext-` prefix are automatically installed:
+
+```json
+{
+  "require": {
+    "ext-pdo_pgsql": "*",
+    "ext-gd": "*",
+    "ext-intl": "*"
+  }
+}
+```
+
+### Web Root Detection
+
+migetpacks automatically detects the web root directory by checking for these directories (in order):
+
+1. `web/`
+2. `public/`
+3. `html/`
+4. `www/`
+5. `.` (project root, fallback)
+
+## Run Command
+
+The default run command uses FrankenPHP with Caddy:
+
+```bash
+frankenphp run --config /etc/caddy/Caddyfile
+```
+
+Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: frankenphp run --config /etc/caddy/Caddyfile
+```
+
+### PHP Configuration
+
+Production PHP settings are automatically configured via environment variables:
+
+| Setting | Default |
+|---------|---------|
+| `memory_limit` | `256M` |
+| `max_execution_time` | `30` |
+| `upload_max_filesize` | `32M` |
+| `opcache.enable` | `1` |
+| `display_errors` | `Off` |
+| `session.cookie_secure` | `1` |
+
+These can be overridden at runtime by setting the corresponding `PHP_INI_*` environment variable (e.g., `PHP_INI_MEMORY_LIMIT=512M`).
+
+## Caching
+
+### Layer Caching
+
+Dependencies are cached by copying `composer.json` and `composer.lock` before the full source:
+
+| Scenario | Dependency Install |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | **Cached** |
+| Lockfile change | Runs |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, Composer packages are cached at:
+
+| Cache Path | Contents |
+|------------|----------|
+| `/cache/composer` | Composer package cache |
+
+## DHI Support
+
+<Warning>
+Docker Hardened Images (DHI) are **not supported** for PHP. FrankenPHP is a specialized application server that requires its own base image.
+</Warning>
+
+When `USE_DHI=true` is set, migetpacks will continue to use the standard FrankenPHP images.
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/php-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-php-app:latest \
+  miget/migetpacks:latest
+```
+
+### With custom environment variables
+
+```bash
+docker run --rm \
+  -v /path/to/php-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-php-app:latest \
+  -e PHP_INI_MEMORY_LIMIT=512M \
+  -e APP_ENV=production \
+  miget/migetpacks:latest
+```

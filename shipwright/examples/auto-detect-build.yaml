@@ -1,0 +1,32 @@
+apiVersion: shipwright.io/v1beta1
+kind: Build
+metadata:
+  name: auto-detect-example
+  namespace: default
+spec:
+  source:
+    type: Git
+    git:
+      url: https://github.com/example/some-app.git
+      revision: main
+
+  strategy:
+    name: migetpacks
+    kind: ClusterBuildStrategy
+
+  # No paramValues needed - language will be auto-detected!
+  # Version will be detected from project files or use defaults
+
+  output:
+    image: registry.example.com/my-org/some-app:latest
+    credentials:
+      name: registry-credentials
+---
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  name: auto-detect-run-1
+  namespace: default
+spec:
+  build:
+    name: auto-detect-example

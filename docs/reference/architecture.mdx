@@ -1,0 +1,219 @@
+---
+title: "Architecture"
+description: "How migetpacks builds containers"
+---
+
+## Overview
+
+migetpacks is a containerized build runtime that detects your application's language, generates an optimized multi-stage Dockerfile, and builds a production-ready container image. It runs entirely inside a Docker container using Docker-in-Docker (DinD).
+
+## Build Flow
+
+The build process follows a linear pipeline:
+
+```text
+detect → detect-version → generate Dockerfile → buildx build → push
+```
+
+1. **Detect** (`bin/detect`) -- Identifies the programming language from source files
+2. **Detect Version** (`bin/detect-version`) -- Reads version from `.node-version`, `.nvmrc`, `.ruby-version`, `package.json`, etc.
+3. **Generate Dockerfile** (`bin/build`) -- Creates a multi-stage Dockerfile using the language-specific library
+4. **Build** -- Runs `docker buildx build` with BuildKit features
+5. **Push** -- Pushes the built image to the target registry (or loads locally)
+
+## Docker-in-Docker (DinD)
+
+migetpacks starts a Docker daemon (`dockerd`) inside its own container. This provides:
+
+- Isolation from the host Docker daemon
+- Control over BuildKit configuration
+- Registry mirror configuration
+- Custom storage driver options
+
+### Daemon Configuration
+
+The internal Docker daemon is configured with:
+
+```json
+{
+  "storage-driver": "overlay2",
+  "registry-mirrors": ["https://your-mirror.io"],
+  "features": {
+    "buildkit": true
+  }
+}
+```
+
+### MTU Configuration
+
+The Docker network MTU is lowered by 50 bytes from the host MTU to accommodate overlay network encapsulation headers:
+
+```text
+Host MTU: 1500
+DinD MTU: 1450
+```
+
+This prevents packet fragmentation when running inside Kubernetes overlay networks (Flannel, Calico, Weave).
+
+### Storage Driver
+
+The default storage driver is `overlay2`. For nested DinD environments where `overlay2` is not available, use `fuse-overlayfs`:
+
+```bash
+STORAGE_DRIVER=fuse-overlayfs
+```
+
+## Multi-Stage Builds
+
+Every generated Dockerfile uses multi-stage builds to separate build dependencies from the runtime image:
+
+```dockerfile
+# Stage 1: Builder (has compilers, dev tools, build deps)
+FROM node:20 AS builder
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build && npm prune --production
+
+# Stage 2: Runtime (minimal, no build tools)
+FROM node:20-slim
+WORKDIR /app
+COPY --from=builder /build ./
+USER miget
+EXPOSE 5000
+CMD ["node", "server.js"]
+```
+
+**Benefits:**
+- Runtime image contains only production dependencies
+- Build tools and intermediate files are not shipped
+- Smaller image size and reduced attack surface
+
+## BuildKit Features
+
+migetpacks leverages BuildKit for advanced build capabilities:
+
+### Cache Mounts
+
+Package manager caches are mounted as BuildKit cache volumes, persisting across builds:
+
+```dockerfile
+RUN --mount=type=cache,target=/root/.npm,sharing=shared \
+    npm ci
+```
+
+This avoids re-downloading packages when only source code changes.
+
+### Inline Cache
+
+When `CACHE_IMAGE` is set, BuildKit exports cache metadata inline with the image, enabling cross-machine cache reuse:
+
+```bash
+CACHE_IMAGE=registry.io/myapp:cache
+CACHE_MODE=max  # Cache all layers (default: min, final layer only)
+```
+
+### Additional Cache Sources
+
+Use `CACHE_FROM` to specify additional read-only cache sources:
+
+```bash
+CACHE_FROM=registry.io/myapp:main-cache,registry.io/myapp:develop-cache
+```
+
+These are skipped when `NO_CACHE=true`.
+
+## Layer Caching Strategy
+
+Dockerfiles are generated with optimized layer ordering to maximize cache hits:
+
+```dockerfile
+# Layer 1: Dependency manifest (changes rarely)
+COPY package.json package-lock.json ./
+
+# Layer 2: Install dependencies (CACHED if manifest unchanged)
+RUN npm ci
+
+# Layer 3: Source code (changes frequently)
+COPY . .
+
+# Layer 4: Build (runs when source changes)
+RUN npm run build
+```
+
+| Scenario | Layer 2 (install) | Layer 4 (build) |
+|----------|-------------------|-----------------|
+| First build | Runs | Runs |
+| Source change only | **Cached** | Runs |
+| Lockfile change | Runs | Runs |
+
+This optimization means dependency installation is skipped for most iterative builds, saving significant time.
+
+## Registry Mirror
+
+When `REGISTRY_MIRROR` is set, it is configured in the Docker daemon's `registry-mirrors` list. All image pulls automatically try the mirror first before falling back to Docker Hub:
+
+```json
+{
+  "registry-mirrors": ["https://registry.example.io/mirror"]
+}
+```
+
+This is particularly effective for:
+- Avoiding Docker Hub rate limits
+- Reducing pull times in private networks
+- Caching base images locally (e.g., Harbor pull-through proxy)
+
+## Security Model
+
+### Non-Root Runtime
+
+All generated containers run as a non-root user (`miget` uid 1000, or `nonroot` for DHI). This prevents privilege escalation and meets Kubernetes Pod Security Standards.
+
+### Read-Only Source Directories
+
+Source code is mounted read-only (`readOnly: true`) when possible. migetpacks copies source to a working directory before building, so the original source is never modified.
+
+### Credential Filtering
+
+The `KNOWN_BUILDER_VARS` list in `bin/build` ensures sensitive environment variables are never written to the generated Dockerfile:
+
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` -- never exposed
+- `DOCKER_CONFIG` -- not written to image
+- Builder-internal variables -- filtered out
+
+Only unknown environment variables (user-defined) are injected as `ENV` statements in the Dockerfile. This enables passing build-time configuration like `NODE_OPTIONS` or `VITE_API_URL` while keeping secrets safe.
+
+### Image Provenance
+
+BuildKit records build provenance metadata, including:
+- Source commit information (when available)
+- Build timestamps
+- Builder image version
+
+## Component Reference
+
+| Component | Path | Purpose |
+|-----------|------|---------|
+| Language detection | `bin/detect` | Identifies language from source files |
+| Version detection | `bin/detect-version` | Reads version from config files |
+| Main build orchestrator | `bin/build` | Generates Dockerfile, runs buildx |
+| Release metadata | `bin/release` | Parses Procfile, outputs process types |
+| Common helpers | `lib/common.sh` | Output formatting, cache ID generation |
+| Multi-buildpack | `lib/buildpacks.sh` | Multiple language runtime support |
+| Node.js | `lib/nodejs.sh` | Node.js/npm/yarn/pnpm builds |
+| Python | `lib/python.sh` | Python/pip/uv builds |
+| Ruby | `lib/ruby.sh` | Ruby/Bundler/Rails builds |
+| Go | `lib/go.sh` | Go module builds |
+| Rust | `lib/rust.sh` | Rust/Cargo builds |
+| Java | `lib/java.sh` | Java/Maven/Gradle builds |
+| Kotlin | `lib/kotlin.sh` | Kotlin/Gradle builds |
+| Scala | `lib/scala.sh` | Scala/sbt builds |
+| Clojure | `lib/clojure.sh` | Clojure/Leiningen builds |
+| .NET | `lib/dotnet.sh` | .NET/C# builds |
+| PHP | `lib/php.sh` | PHP/Composer/FrankenPHP builds |
+| Elixir | `lib/elixir.sh` | Elixir/Phoenix builds |
+| Deno | `lib/deno.sh` | Deno builds |
+| Bun | `lib/bun.sh` | Bun builds |
+| Entrypoint | `bin/entrypoint.sh` | Container entrypoint (starts dockerd) |

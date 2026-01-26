@@ -1,0 +1,220 @@
+---
+title: "Runtime Container"
+description: "Built container configuration"
+---
+
+## Overview
+
+migetpacks produces optimized runtime containers that run as non-root users by default. The container configuration depends on whether you are using standard images or Docker Hardened Images (DHI).
+
+## Standard Runtime
+
+When `USE_DHI=false` (default), migetpacks generates containers with the following configuration:
+
+| Property | Value |
+|----------|-------|
+| User | `miget` (uid: 1000) |
+| Group | `miget` (gid: 1000) |
+| Working directory | `/app` |
+| Exposed port | `5000` (configurable via `PORT`) |
+| Shell | Available (`/bin/sh`) |
+
+### Container Structure
+
+```text
+/app/                    # Application source and dependencies
+/app/node_modules/       # Node.js dependencies (if applicable)
+/app/vendor/bundle/      # Ruby gems (if applicable)
+/app/.venv/              # Python virtualenv (if applicable)
+```
+
+### User Configuration
+
+The `miget` user is created in the runtime image:
+
+```dockerfile
+RUN groupadd -g 1000 miget && \
+    useradd -u 1000 -g miget -m miget
+USER miget
+WORKDIR /app
+```
+
+### Port Configuration
+
+The default exposed port is `5000`. Override it with the `PORT` environment variable:
+
+```bash
+docker run --rm \
+  -e PORT=3000 \
+  -e OUTPUT_IMAGE=my-app:local \
+  miget/migetpacks:latest
+```
+
+The `PORT` environment variable is set in the generated Dockerfile, so the application can read it at runtime.
+
+## DHI Runtime (Distroless)
+
+When `USE_DHI=true`, migetpacks uses Docker Hardened Images from dhi.io. These are distroless containers with a minimal attack surface.
+
+| Property | Value |
+|----------|-------|
+| User | `nonroot` (uid varies by image) |
+| Working directory | `/app` |
+| Exposed port | `5000` (configurable via `PORT`) |
+| Shell | **Not available** |
+| Package manager | **Not available** |
+
+### Distroless Constraints
+
+DHI runtime images have no shell, no package manager, and no common utilities. This means:
+
+1. **No shell commands** -- Commands cannot use `/bin/sh -c` wrappers
+2. **Exec format only** -- Process commands must use exec format
+3. **No shebangs** -- Scripts like `./bin/rails` must be invoked as `ruby bin/rails`
+4. **No variable expansion** -- Shell variables like `${PORT:-5000}` must be pre-expanded
+5. **No debugging tools** -- No `ls`, `cat`, `curl`, etc. in production
+
+### Command Transformation
+
+migetpacks automatically transforms commands for distroless:
+
+| Original | Transformed |
+|----------|-------------|
+| `./bin/rails server` | `ruby bin/rails server` |
+| `bundle exec puma` | `ruby -S bundle exec puma` |
+| `${PORT:-5000}` | Pre-expanded to actual port value |
+
+### Result JSON Indicator
+
+When DHI is used, the result JSON includes `"_shell": false` to signal that the container is distroless. Deployment systems should use this flag to determine how to execute commands in the container.
+
+## Runtime Cleanup
+
+migetpacks automatically removes unnecessary files from runtime images to reduce size and attack surface.
+
+### Node.js
+
+| Removed | Description |
+|---------|-------------|
+| `.git/` | Git history |
+| `.github/` | GitHub configuration |
+| `test/`, `tests/` | Test files |
+| `spec/` | Spec files |
+| `__tests__/` | Jest tests |
+| `coverage/` | Coverage reports |
+| `.nyc_output/` | NYC coverage data |
+| `.cache/` | Build cache |
+
+### Ruby
+
+| Removed | Description |
+|---------|-------------|
+| `.git/` | Git history |
+| `.github/` | GitHub configuration |
+| `test/`, `tests/` | Test files |
+| `spec/` | RSpec files |
+| `features/` | Cucumber features |
+| `.rspec` | RSpec config |
+| `.rubocop*` | Rubocop config |
+| `vendor/bundle/*/cache/` | Gem cache |
+
+### Python
+
+| Removed | Description |
+|---------|-------------|
+| `.git/` | Git history |
+| `.github/` | GitHub configuration |
+| `test/`, `tests/` | Test files |
+| `__pycache__/` | Bytecode cache |
+| `.pytest_cache/` | Pytest cache |
+| `.coverage` | Coverage data |
+| `htmlcov/` | Coverage HTML |
+
+### .NET
+
+| Removed | Description |
+|---------|-------------|
+| `.git/` | Git history |
+| `.github/` | GitHub configuration |
+| `*.cs` | C# source files |
+| `*.csproj` | Project files |
+| `*.sln`, `*.slnx` | Solution files |
+| `obj/` | Intermediate build output |
+| `bin/Release/net*/` | Additional framework outputs |
+| `bin/Debug/` | Debug builds |
+
+<Note>
+.NET is a compiled language, so source code is completely removed from the runtime image. Node.js, Ruby, and Python are interpreted languages, so source code is kept but development/test files are removed.
+</Note>
+
+## Inspecting Built Containers
+
+### List Files
+
+```bash
+docker run --rm my-app:local ls -la /app/
+```
+
+### Check Environment
+
+```bash
+docker run --rm my-app:local env
+```
+
+### Check User
+
+```bash
+docker run --rm my-app:local id
+# uid=1000(miget) gid=1000(miget) groups=1000(miget)
+```
+
+### Check Exposed Ports
+
+```bash
+docker inspect my-app:local --format='{{json .Config.ExposedPorts}}'
+# {"5000/tcp":{}}
+```
+
+### Check Entrypoint/CMD
+
+```bash
+docker inspect my-app:local --format='{{json .Config.Cmd}}'
+# ["node","server.js"]
+```
+
+### Layer History
+
+```bash
+docker history my-app:local
+```
+
+### Image Size
+
+```bash
+docker images my-app:local --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
+```
+
+## Security
+
+### Non-Root by Default
+
+All migetpacks containers run as a non-root user. This provides:
+- Process isolation from the host
+- Prevention of privilege escalation
+- Compliance with Kubernetes Pod Security Standards (restricted profile)
+
+### Read-Only Filesystem
+
+For maximum security, run the container with a read-only root filesystem:
+
+```bash
+docker run --rm \
+  --read-only \
+  --tmpfs /tmp \
+  -p 5000:5000 \
+  my-app:local
+```
+
+### No Credentials in Image
+
+migetpacks never includes AWS credentials or other secrets in the built image. The `KNOWN_BUILDER_VARS` filter ensures sensitive variables (like `AWS_ACCESS_KEY_ID`) are excluded from the generated Dockerfile.

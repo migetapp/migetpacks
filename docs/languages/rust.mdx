@@ -1,0 +1,178 @@
+---
+title: "Rust"
+description: "Build and deploy Rust applications with optimized dependency caching and release binaries."
+---
+
+## Detection
+
+migetpacks detects Rust when any of these files are present in your project root:
+
+- `Cargo.toml`
+- `Cargo.lock`
+
+## Version Detection
+
+Rust version is resolved in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `RUSTUP_TOOLCHAIN` env var | `RUSTUP_TOOLCHAIN=1.80.0` |
+| 2 | `rust-toolchain` file | `1.92.0` |
+| 3 | `channel` in `rust-toolchain.toml` | `channel = "1.92.0"` |
+| 4 | Default | `1.92.0` |
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile with an optimized dependency caching strategy:
+
+```dockerfile
+# Builder stage
+FROM rust:1.92 AS builder
+WORKDIR /build
+
+# Rust build environment
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+
+# Layer 1: Copy dependency manifests
+COPY Cargo.toml Cargo.lock* ./
+
+# Layer 2: Create dummy source and build deps (CACHED when Cargo.toml unchanged)
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
+RUN cargo build --release && rm -rf src
+
+# Layer 3: Copy real source code
+COPY . .
+
+# Layer 4: Touch main.rs and rebuild (only app code recompiles)
+RUN touch src/main.rs
+RUN cargo build --release \
+    && cp target/release/myapp /build/app \
+    && rm -rf src target Cargo.toml Cargo.lock .git
+
+# Runtime stage
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates
+WORKDIR /app
+COPY --from=builder /build /app
+ENV RUST_BACKTRACE=1
+ENV RUST_LOG=info
+```
+
+### Dependency Caching Strategy
+
+Rust's dependency caching uses a "dummy source" technique:
+
+1. Copy `Cargo.toml` and `Cargo.lock`
+2. Create a minimal `fn main() {}` source file
+3. Run `cargo build --release` to compile all dependencies
+4. Remove the dummy source
+5. Copy the real source code
+6. Touch `src/main.rs` to invalidate only the application crate
+7. Rebuild -- only the application code recompiles
+
+This ensures that dependency compilation is cached across builds when only source code changes.
+
+### Binary Detection
+
+The binary name is automatically detected from `Cargo.toml`:
+
+1. `[[bin]]` section `name` field
+2. `[package]` section `name` field
+3. Falls back to `app`
+
+### Workspace Projects
+
+For workspace projects (when `[workspace]` is present in `Cargo.toml`), all workspace member `Cargo.toml` files are copied for proper dependency resolution.
+
+### Static Assets
+
+If your project contains `static/`, `public/`, `assets/`, `templates/`, `dist/`, or `build/` directories, they are automatically copied alongside the binary to the runtime image.
+
+## Run Command
+
+The default run command is determined in this order:
+
+| Priority | Source | Command |
+|----------|--------|---------|
+| 1 | `RUN_COMMAND` env var | User-specified |
+| 2 | `web:` in Procfile | From Procfile |
+| 3 | Default | `./app` |
+
+<Note>
+Procfile commands referencing `./target/release/binary` are automatically translated to `./app` since the binary is copied to the application root during build.
+</Note>
+
+### Runtime Environment
+
+The following environment variables are set in the runtime container:
+
+```bash
+RUST_BACKTRACE=1
+RUST_LOG=info
+```
+
+## Caching
+
+### Docker Layer Caching
+
+The dummy-source technique ensures that `cargo build --release` for dependencies is cached when only source code changes. A full dependency rebuild only happens when `Cargo.toml` or `Cargo.lock` is modified.
+
+### BuildKit Cache Mounts
+
+When `BUILD_CACHE_DIR` is configured, BuildKit cache mounts are used:
+
+| Cache Path | Contents |
+|-----------|----------|
+| `/cache/cargo` | Cargo registry (`/usr/local/cargo/registry`) and build artifacts (`/build/target`) |
+
+### Registry Cache
+
+Use `CACHE_IMAGE` to push/pull BuildKit inline cache layers to a registry for cross-build caching.
+
+## DHI Support
+
+<Check>Rust is fully supported with Docker Hardened Images.</Check>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/rust:{version}-dev` |
+| Runtime | `dhi.io/rust:{version}` |
+
+The `-dev` variant includes a shell and build tools (cargo, rustc). The runtime image is distroless with no shell, providing a minimal attack surface.
+
+Since Rust produces static binaries, the distroless runtime works without any special handling.
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-rust-app:latest \
+  miget/migetpacks:latest
+```
+
+### With Custom Options
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/app:v1 \
+  -e RUSTUP_TOOLCHAIN=1.80.0 \
+  -e BUILD_COMMAND="cargo build --release --features production" \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+### Workspace Project
+
+```bash
+docker run --rm \
+  -v /path/to/workspace:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/api:v1 \
+  -e RUN_COMMAND="./app" \
+  miget/migetpacks:latest
+```

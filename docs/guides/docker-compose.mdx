@@ -1,0 +1,233 @@
+---
+title: "Docker Compose"
+description: "Build multi-service applications from Docker Compose files, with each service pushed as a separate image."
+---
+
+## Overview
+
+migetpacks supports Docker Compose files for building multi-service applications. When a compose file is detected, all services with a `build` section are built and pushed to the registry as separate images.
+
+## Detection Priority
+
+migetpacks looks for compose files in the following order:
+
+<Steps>
+  <Step title="COMPOSE_FILE environment variable">
+    If set, this path is used directly.
+  </Step>
+  <Step title="compose.yaml">
+    The modern default compose file name.
+  </Step>
+  <Step title="compose.yml">
+    Alternative YAML extension.
+  </Step>
+  <Step title="docker-compose.yaml">
+    Legacy Docker Compose file name.
+  </Step>
+  <Step title="docker-compose.yml">
+    Legacy alternative YAML extension.
+  </Step>
+</Steps>
+
+<Note>
+If none of these files are found, migetpacks falls back to standard language detection and single-image build.
+</Note>
+
+## Image Naming
+
+Each service's image is named by appending the service name to `OUTPUT_IMAGE`:
+
+```text
+OUTPUT_IMAGE-{service_name}
+```
+
+For example, with `OUTPUT_IMAGE=registry.io/myapp:latest`:
+
+| Service | Image Name |
+|---------|-----------|
+| api | `registry.io/myapp-api:latest` |
+| web | `registry.io/myapp-web:latest` |
+| worker | `registry.io/myapp-worker:latest` |
+
+## Example
+
+### compose.yaml
+
+```yaml
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+
+  worker:
+    build: ./worker  # shorthand syntax
+```
+
+### Project Structure
+
+```text
+my-project/
+├── compose.yaml
+├── api/
+│   ├── Dockerfile
+│   ├── main.go
+│   └── go.mod
+├── web/
+│   ├── Dockerfile
+│   ├── package.json
+│   └── src/
+└── worker/
+    ├── Dockerfile
+    ├── requirements.txt
+    └── worker.py
+```
+
+### Build Command
+
+```bash
+docker run --rm \
+  -v /path/to/my-project:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/myapp:latest \
+  miget/migetpacks:latest
+```
+
+### Build Output
+
+The build produces three images:
+- `registry.io/myapp-api:latest`
+- `registry.io/myapp-web:latest`
+- `registry.io/myapp-worker:latest`
+
+## Custom Compose File
+
+Use `COMPOSE_FILE` to specify a non-standard compose file:
+
+<CodeGroup>
+```bash Production Compose
+docker run --rm \
+  -v /path/to/project:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/myapp:latest \
+  -e COMPOSE_FILE=docker-compose.prod.yaml \
+  miget/migetpacks:latest
+```
+
+```bash Staging Compose
+docker run --rm \
+  -v /path/to/project:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/myapp:staging \
+  -e COMPOSE_FILE=docker-compose.staging.yaml \
+  miget/migetpacks:latest
+```
+</CodeGroup>
+
+## Compose File Syntax
+
+migetpacks supports both the full and shorthand `build` syntax:
+
+<Tabs>
+  <Tab title="Full Syntax">
+    ```yaml
+    services:
+      api:
+        build:
+          context: ./api
+          dockerfile: Dockerfile
+          args:
+            NODE_ENV: production
+    ```
+  </Tab>
+  <Tab title="Shorthand Syntax">
+    ```yaml
+    services:
+      api:
+        build: ./api
+    ```
+    This is equivalent to setting `context: ./api` with the default `Dockerfile`.
+  </Tab>
+</Tabs>
+
+## Services Without Build Sections
+
+Services without a `build` section (e.g., database services using pre-built images) are skipped:
+
+```yaml
+services:
+  api:
+    build: ./api          # Built and pushed
+
+  web:
+    build: ./web          # Built and pushed
+
+  postgres:
+    image: postgres:16    # Skipped (no build section)
+
+  redis:
+    image: redis:7        # Skipped (no build section)
+```
+
+Only `api` and `web` are built; `postgres` and `redis` are ignored.
+
+## Build Caching with Compose
+
+Registry-based caching works with compose builds. Each service gets its own cache image:
+
+```bash
+docker run --rm \
+  -v /path/to/project:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/myapp:latest \
+  -e CACHE_IMAGE=registry.io/myapp:buildcache \
+  miget/migetpacks:latest
+```
+
+## CI/CD Example
+
+### GitHub Actions
+
+```yaml
+name: Build Multi-Service App
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: your-registry.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build all services
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace/source:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e OUTPUT_IMAGE=your-registry.io/myapp:${{ github.sha }} \
+            miget/migetpacks:latest
+```
+
+This produces:
+- `your-registry.io/myapp-api:{sha}`
+- `your-registry.io/myapp-web:{sha}`
+- `your-registry.io/myapp-worker:{sha}`

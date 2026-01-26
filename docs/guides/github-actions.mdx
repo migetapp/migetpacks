@@ -1,0 +1,229 @@
+---
+title: "GitHub Actions"
+description: "Use migetpacks in GitHub Actions workflows for automated container builds on self-hosted and GitHub-hosted runners."
+---
+
+## Overview
+
+migetpacks integrates with GitHub Actions to build and push container images as part of your CI/CD pipeline. It works with both self-hosted runners (recommended for performance) and GitHub-hosted runners.
+
+## Self-Hosted Runner
+
+Self-hosted runners offer the best performance because Docker layer caches and package manager caches persist between builds.
+
+```yaml
+name: Build with migetpacks
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: your-registry.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Setup cache directory
+        run: mkdir -p /home/runner/migetpacks-cache
+
+      - name: Build with migetpacks
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace/source:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /home/runner/migetpacks-cache:/cache \
+            -e OUTPUT_IMAGE=your-registry.io/app:${{ github.sha }} \
+            -e BUILD_CACHE_DIR=/cache \
+            -e REGISTRY_MIRROR=https://registry.example.io/mirror \
+            -e USE_DHI=true \
+            miget/migetpacks:latest
+```
+
+<Note>
+The persistent cache directory (`/home/runner/migetpacks-cache`) survives runner restarts and dramatically speeds up dependency installation on subsequent builds.
+</Note>
+
+## GitHub-Hosted Runner
+
+GitHub-hosted runners do not persist Docker layer caches between runs. Use `CACHE_IMAGE` for registry-based caching to speed up builds.
+
+```yaml
+name: Build with migetpacks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: your-registry.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build with migetpacks
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace/source:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e OUTPUT_IMAGE=your-registry.io/app:${{ github.sha }} \
+            -e CACHE_IMAGE=your-registry.io/app:buildcache \
+            -e CACHE_MODE=max \
+            miget/migetpacks:latest
+```
+
+## Configuration Options
+
+### Registry Login
+
+Always authenticate before running migetpacks if you are pushing to a private registry:
+
+<CodeGroup>
+```yaml Docker Hub
+- name: Log into Docker Hub
+  uses: docker/login-action@v3
+  with:
+    username: ${{ secrets.DOCKERHUB_USERNAME }}
+    password: ${{ secrets.DOCKERHUB_TOKEN }}
+```
+
+```yaml GitHub Container Registry
+- name: Log into GHCR
+  uses: docker/login-action@v3
+  with:
+    registry: ghcr.io
+    username: ${{ github.actor }}
+    password: ${{ secrets.GITHUB_TOKEN }}
+```
+
+```yaml AWS ECR
+- name: Log into ECR
+  uses: docker/login-action@v3
+  with:
+    registry: 123456789.dkr.ecr.us-east-1.amazonaws.com
+    username: ${{ secrets.AWS_ACCESS_KEY_ID }}
+    password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+```
+</CodeGroup>
+
+### Build Cache Directory
+
+`BUILD_CACHE_DIR` enables shared package manager caching. On self-hosted runners, point this to a persistent directory:
+
+```yaml
+- name: Setup cache directory
+  run: mkdir -p /home/runner/migetpacks-cache
+
+- name: Build with migetpacks
+  run: |
+    docker run --rm \
+      -v /home/runner/migetpacks-cache:/cache \
+      -e BUILD_CACHE_DIR=/cache \
+      ...
+```
+
+### Registry Mirror
+
+`REGISTRY_MIRROR` configures a pull-through cache for Docker Hub images, reducing image pull times:
+
+```yaml
+-e REGISTRY_MIRROR=https://your-mirror.example.com
+```
+
+### Custom Environment Variables
+
+Pass build-time environment variables directly:
+
+```yaml
+- name: Build with migetpacks
+  run: |
+    docker run --rm \
+      -v ${{ github.workspace }}:/workspace/source:ro \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e OUTPUT_IMAGE=your-registry.io/app:${{ github.sha }} \
+      -e NODE_OPTIONS="--max-old-space-size=4096" \
+      -e NEXT_PUBLIC_API_URL="${{ vars.API_URL }}" \
+      -e RAILS_MASTER_KEY="${{ secrets.RAILS_MASTER_KEY }}" \
+      miget/migetpacks:latest
+```
+
+<Warning>
+Secrets like `RAILS_MASTER_KEY` are injected as build-time environment variables and will be present in the generated Dockerfile. They are visible in the final image's environment. Use runtime secrets injection for sensitive values in production.
+</Warning>
+
+## Full Workflow Example
+
+This complete workflow builds on push to main, tags with both commit SHA and `latest`, and uses all available caching strategies:
+
+```yaml
+name: Build and Push
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: your-registry.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Setup persistent cache
+        run: mkdir -p /home/runner/migetpacks-cache
+
+      - name: Build with migetpacks
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace/source:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /home/runner/migetpacks-cache:/cache \
+            -e OUTPUT_IMAGE=your-registry.io/app:${{ github.sha }} \
+            -e BUILD_CACHE_DIR=/cache \
+            -e CACHE_IMAGE=your-registry.io/app:buildcache \
+            -e CACHE_MODE=max \
+            -e REGISTRY_MIRROR=https://registry.example.io/mirror \
+            -e USE_DHI=true \
+            miget/migetpacks:latest
+```
+
+## Performance Tips
+
+<Tabs>
+  <Tab title="Self-Hosted">
+    - **Persistent cache**: Use `BUILD_CACHE_DIR` pointed at a local directory
+    - **Pre-pull images**: Pull common base images during runner initialization
+    - **Registry mirror**: Use `REGISTRY_MIRROR` for Docker Hub images
+    - **Local Docker cache**: Docker layer cache persists in `/var/lib/docker`
+    - **NVMe storage**: Use local SSD/NVMe for `/var/lib/docker` instead of network storage
+  </Tab>
+  <Tab title="GitHub-Hosted">
+    - **Registry cache**: Use `CACHE_IMAGE` with `CACHE_MODE=max` for best cache hits
+    - **Additional sources**: Use `CACHE_FROM` to read from multiple cache images
+    - **Smaller images**: Use `USE_DHI=true` for distroless runtime images
+  </Tab>
+</Tabs>

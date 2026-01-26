@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# Release metadata script
+# Outputs release metadata in YAML format
+
+set -e
+
+BUILD_DIR=$1
+
+# Source helper functions
+BUILDPACK_DIR=$(cd "$(dirname "$0")/.." && pwd)
+source "$BUILDPACK_DIR/lib/common.sh"
+
+# Detect language
+LANGUAGE=$(detect_language "$BUILD_DIR")
+LANG_NORMALIZED=$(echo "$LANGUAGE" | tr '[:upper:]' '[:lower:]' | sed 's/ .*//; s/(.*//;')
+
+# Get version
+VERSION=$(LANGUAGE="$LANG_NORMALIZED" "$BUILDPACK_DIR/bin/detect-version" "$BUILD_DIR")
+
+# Parse Procfile if it exists
+PROCFILE_WEB=""
+PROCFILE_FIRST=""
+
+if [ -f "$BUILD_DIR/Procfile" ]; then
+  # Extract web process from Procfile
+  PROCFILE_WEB=$(grep -E "^web:" "$BUILD_DIR/Procfile" 2>/dev/null | sed 's/^web:[[:space:]]*//' | head -1 || true)
+
+  # If no web process, get the first process defined
+  if [ -z "$PROCFILE_WEB" ]; then
+    PROCFILE_FIRST=$(grep -E "^[a-zA-Z_][a-zA-Z0-9_]*:" "$BUILD_DIR/Procfile" 2>/dev/null | head -1 | sed 's/^[^:]*:[[:space:]]*//' || true)
+  fi
+fi
+
+# Default process type based on language (fallback if no Procfile)
+DEFAULT_WEB_PROCESS=""
+
+case "$LANG_NORMALIZED" in
+  node.js|nodejs|node)
+    if [ -f "$BUILD_DIR/package.json" ]; then
+      if grep -q '"start"' "$BUILD_DIR/package.json"; then
+        DEFAULT_WEB_PROCESS="npm start"
+      else
+        DEFAULT_WEB_PROCESS="node index.js"
+      fi
+    fi
+    ;;
+  deno)
+    # Detect entry point from deno.json tasks or fall back to common patterns
+    DENO_ENTRYPOINT=""
+    if [ -f "$BUILD_DIR/deno.json" ]; then
+      DENO_ENTRYPOINT=$(grep -E '"start"' "$BUILD_DIR/deno.json" | head -1 | grep -oE '[a-zA-Z0-9_/-]+\.(ts|tsx|js|mts)' | head -1)
+    fi
+    if [ -z "$DENO_ENTRYPOINT" ]; then
+      for file in main.ts mod.ts server.ts app.ts index.ts index.js main.js src/main.ts src/mod.ts; do
+        if [ -f "$BUILD_DIR/$file" ]; then
+          DENO_ENTRYPOINT="$file"
+          break
+        fi
+      done
+    fi
+    [ -z "$DENO_ENTRYPOINT" ] && DENO_ENTRYPOINT="main.ts"
+    DEFAULT_WEB_PROCESS="deno run --allow-net --allow-read --allow-env $DENO_ENTRYPOINT"
+    ;;
+  bun)
+    # Detect entry point from package.json scripts.start or fall back to common patterns
+    BUN_ENTRYPOINT=""
+    if [ -f "$BUILD_DIR/package.json" ]; then
+      BUN_START=$(jq -r '.scripts.start // empty' "$BUILD_DIR/package.json" 2>/dev/null)
+      if [ -n "$BUN_START" ]; then
+        BUN_ENTRYPOINT=$(echo "$BUN_START" | grep -oE '[a-zA-Z0-9_/-]+\.(ts|tsx|js|mjs)' | head -1)
+      fi
+    fi
+    if [ -z "$BUN_ENTRYPOINT" ]; then
+      for file in index.ts server.ts app.ts main.ts src/index.ts index.js server.js; do
+        if [ -f "$BUILD_DIR/$file" ]; then
+          BUN_ENTRYPOINT="$file"
+          break
+        fi
+      done
+    fi
+    [ -z "$BUN_ENTRYPOINT" ] && BUN_ENTRYPOINT="index.ts"
+    DEFAULT_WEB_PROCESS="bun run $BUN_ENTRYPOINT"
+    ;;
+  python)
+    # Check if gunicorn is installed (check all package manager files)
+    HAS_GUNICORN=false
+    if [ -f "$BUILD_DIR/requirements.txt" ] && grep -qi "gunicorn" "$BUILD_DIR/requirements.txt"; then
+      HAS_GUNICORN=true
+    elif [ -f "$BUILD_DIR/pyproject.toml" ] && grep -qi "gunicorn" "$BUILD_DIR/pyproject.toml"; then
+      HAS_GUNICORN=true
+    elif [ -f "$BUILD_DIR/uv.lock" ] && grep -qi 'name = "gunicorn"' "$BUILD_DIR/uv.lock"; then
+      HAS_GUNICORN=true
+    fi
+
+    # Check if uvicorn is installed (FastAPI/Starlette)
+    HAS_UVICORN=false
+    if [ -f "$BUILD_DIR/requirements.txt" ] && grep -qi "uvicorn" "$BUILD_DIR/requirements.txt"; then
+      HAS_UVICORN=true
+    elif [ -f "$BUILD_DIR/pyproject.toml" ] && grep -qi "uvicorn" "$BUILD_DIR/pyproject.toml"; then
+      HAS_UVICORN=true
+    elif [ -f "$BUILD_DIR/uv.lock" ] && grep -qi 'name = "uvicorn"' "$BUILD_DIR/uv.lock"; then
+      HAS_UVICORN=true
+    fi
+
+    # Detect Django project by looking for manage.py and wsgi.py in a subdirectory
+    DJANGO_PROJECT=""
+    if [ -f "$BUILD_DIR/manage.py" ]; then
+      # Find wsgi.py in subdirectory to get project name
+      WSGI_FILE=$(find "$BUILD_DIR" -maxdepth 2 -name "wsgi.py" -not -path "$BUILD_DIR/wsgi.py" 2>/dev/null | head -1)
+      if [ -n "$WSGI_FILE" ]; then
+        # Extract project name from path (e.g., /path/mysite/wsgi.py -> mysite)
+        DJANGO_PROJECT=$(dirname "$WSGI_FILE" | xargs basename)
+      fi
+    fi
+
+    # Detect WSGI/ASGI app and set appropriate command
+    if [ -n "$DJANGO_PROJECT" ] && [ "$HAS_GUNICORN" = true ]; then
+      # Django with gunicorn
+      DEFAULT_WEB_PROCESS="gunicorn ${DJANGO_PROJECT}.wsgi:application --bind 0.0.0.0:\$PORT"
+    elif [ -n "$DJANGO_PROJECT" ] && [ "$HAS_UVICORN" = true ]; then
+      # Django with uvicorn (ASGI)
+      DEFAULT_WEB_PROCESS="uvicorn ${DJANGO_PROJECT}.asgi:application --host 0.0.0.0 --port \$PORT"
+    elif [ "$HAS_GUNICORN" = true ]; then
+      if [ -f "$BUILD_DIR/wsgi.py" ]; then
+        DEFAULT_WEB_PROCESS="gunicorn wsgi:application --bind 0.0.0.0:\$PORT"
+      elif [ -f "$BUILD_DIR/app.py" ]; then
+        DEFAULT_WEB_PROCESS="gunicorn app:app --bind 0.0.0.0:\$PORT"
+      elif [ -f "$BUILD_DIR/main.py" ]; then
+        DEFAULT_WEB_PROCESS="gunicorn main:app --bind 0.0.0.0:\$PORT"
+      elif [ -f "$BUILD_DIR/application.py" ]; then
+        DEFAULT_WEB_PROCESS="gunicorn application:application --bind 0.0.0.0:\$PORT"
+      else
+        DEFAULT_WEB_PROCESS="gunicorn app:app --bind 0.0.0.0:\$PORT"
+      fi
+    elif [ "$HAS_UVICORN" = true ]; then
+      if [ -f "$BUILD_DIR/main.py" ]; then
+        DEFAULT_WEB_PROCESS="uvicorn main:app --host 0.0.0.0 --port \$PORT"
+      elif [ -f "$BUILD_DIR/app.py" ]; then
+        DEFAULT_WEB_PROCESS="uvicorn app:app --host 0.0.0.0 --port \$PORT"
+      else
+        DEFAULT_WEB_PROCESS="uvicorn main:app --host 0.0.0.0 --port \$PORT"
+      fi
+    elif [ -f "$BUILD_DIR/manage.py" ]; then
+      # Django without gunicorn - use runserver (not recommended for production)
+      DEFAULT_WEB_PROCESS="python manage.py runserver 0.0.0.0:\$PORT"
+    elif [ -f "$BUILD_DIR/app.py" ]; then
+      DEFAULT_WEB_PROCESS="python app.py"
+    else
+      DEFAULT_WEB_PROCESS="python main.py"
+    fi
+    ;;
+  ruby)
+    if [ -f "$BUILD_DIR/config.ru" ]; then
+      DEFAULT_WEB_PROCESS="bundle exec puma -C config/puma.rb"
+    else
+      DEFAULT_WEB_PROCESS="bundle exec ruby app.rb"
+    fi
+    ;;
+  go|golang)
+    DEFAULT_WEB_PROCESS="./app"
+    ;;
+  rust)
+    DEFAULT_WEB_PROCESS="./app"
+    ;;
+  php)
+    # Detect web root directory (priority: web/, public/, html/, www/, .)
+    PHP_WEBROOT="."
+    for dir in web public html www; do
+      if [ -d "$BUILD_DIR/$dir" ]; then
+        PHP_WEBROOT="$dir"
+        break
+      fi
+    done
+    # FrankenPHP php-server mode
+    DEFAULT_WEB_PROCESS="frankenphp php-server --listen :\$PORT -r $PHP_WEBROOT"
+    ;;
+  java)
+    DEFAULT_WEB_PROCESS="java -jar target/*.jar"
+    ;;
+  kotlin)
+    DEFAULT_WEB_PROCESS="java -jar build/libs/*.jar"
+    ;;
+  scala)
+    # Auto-detect app name from build.sbt for sbt-native-packager apps
+    SCALA_APP_NAME=""
+    if [ -f "$BUILD_DIR/build.sbt" ]; then
+      # Extract name from build.sbt (e.g., name := "scala-getting-started")
+      SCALA_APP_NAME=$(grep -E "^name\s*:=" "$BUILD_DIR/build.sbt" | sed 's/.*:=[[:space:]]*["'"'"']\{0,3\}\([^"'"'"']*\)["'"'"']\{0,3\}/\1/' | head -1)
+    fi
+    if [ -n "$SCALA_APP_NAME" ]; then
+      DEFAULT_WEB_PROCESS="target/universal/stage/bin/${SCALA_APP_NAME}"
+    else
+      DEFAULT_WEB_PROCESS="target/universal/stage/bin/app"
+    fi
+    ;;
+  clojure)
+    # Auto-detect uberjar name from project.clj
+    CLOJURE_UBERJAR=""
+    if [ -f "$BUILD_DIR/project.clj" ]; then
+      CLOJURE_UBERJAR=$(grep -E ':uberjar-name[[:space:]]+"' "$BUILD_DIR/project.clj" | \
+        sed -E 's/.*"([^"]+)".*/\1/' | head -1)
+    fi
+    if [ -n "$CLOJURE_UBERJAR" ]; then
+      DEFAULT_WEB_PROCESS="java -jar target/uberjar/${CLOJURE_UBERJAR}"
+    else
+      # Fall back to project name from defproject
+      CLOJURE_PROJECT=$(grep -E "^\(defproject" "$BUILD_DIR/project.clj" | \
+        sed -E 's/\(defproject[[:space:]]+([^[:space:]]+).*/\1/' | head -1)
+      if [ -n "$CLOJURE_PROJECT" ]; then
+        DEFAULT_WEB_PROCESS="java -jar target/uberjar/${CLOJURE_PROJECT}-standalone.jar"
+      else
+        DEFAULT_WEB_PROCESS="java -jar target/uberjar/app-standalone.jar"
+      fi
+    fi
+    ;;
+  .net|dotnet|csharp)
+    # Detect main project from *.csproj files
+    # Priority: single project, or project with Sdk="Microsoft.NET.Sdk.Web"
+    DOTNET_PROJECT=""
+    CSPROJ_FILES=$(find "$BUILD_DIR" -maxdepth 2 -name "*.csproj" 2>/dev/null)
+    CSPROJ_COUNT=$(echo "$CSPROJ_FILES" | grep -c "\.csproj$" 2>/dev/null || echo "0")
+
+    if [ "$CSPROJ_COUNT" -eq 1 ]; then
+      DOTNET_PROJECT=$(basename "$CSPROJ_FILES" .csproj)
+    elif [ "$CSPROJ_COUNT" -gt 1 ]; then
+      # Multiple projects - find the web project
+      for csproj in $CSPROJ_FILES; do
+        if grep -q 'Sdk="Microsoft.NET.Sdk.Web"' "$csproj" 2>/dev/null; then
+          DOTNET_PROJECT=$(basename "$csproj" .csproj)
+          break
+        fi
+      done
+      # Fallback to first project if no web project found
+      [ -z "$DOTNET_PROJECT" ] && DOTNET_PROJECT=$(basename "$(echo "$CSPROJ_FILES" | head -1)" .csproj)
+    fi
+
+    if [ -n "$DOTNET_PROJECT" ]; then
+      # Use full path to self-contained executable (no cd needed)
+      DEFAULT_WEB_PROCESS="./${DOTNET_PROJECT}/bin/publish/${DOTNET_PROJECT}"
+    else
+      DEFAULT_WEB_PROCESS="./bin/publish/app"
+    fi
+    ;;
+  elixir)
+    DEFAULT_WEB_PROCESS="mix phx.server"
+    ;;
+  *)
+    DEFAULT_WEB_PROCESS="./start.sh"
+    ;;
+esac
+
+# Priority: RUN_COMMAND > Procfile web > Procfile first > language default
+if [ -n "$RUN_COMMAND" ]; then
+  WEB_PROCESS="$RUN_COMMAND"
+elif [ -n "$PROCFILE_WEB" ]; then
+  WEB_PROCESS="$PROCFILE_WEB"
+elif [ -n "$PROCFILE_FIRST" ]; then
+  WEB_PROCESS="$PROCFILE_FIRST"
+else
+  WEB_PROCESS="$DEFAULT_WEB_PROCESS"
+fi
+
+# Translate Rust Procfile commands
+# Rust binary is copied from target/release/ to /build/app
+if [ "$LANG_NORMALIZED" = "rust" ]; then
+  case "$WEB_PROCESS" in
+    # ./target/release/binary [args] -> ./app [args]
+    # target/release/binary [args] -> ./app [args]
+    # ENV=value ./target/release/binary [args] -> ENV=value ./app [args]
+    *"./target/release/"*|*"target/release/"*)
+      WEB_PROCESS=$(echo "$WEB_PROCESS" | sed 's|\./target/release/[^[:space:]]*|./app|' | sed 's|target/release/[^[:space:]]*|./app|')
+      ;;
+  esac
+fi
+
+# Translate PHP commands to FrankenPHP equivalents
+if [ "$LANG_NORMALIZED" = "php" ]; then
+  case "$WEB_PROCESS" in
+    # heroku-php-apache2 <docroot> -> frankenphp php-server
+    heroku-php-apache2*|heroku-php-nginx*)
+      DOCROOT=$(echo "$WEB_PROCESS" | sed -E 's/^heroku-php-(apache2|nginx)[[:space:]]*//')
+      DOCROOT="${DOCROOT%/}"
+      [ -z "$DOCROOT" ] && DOCROOT="."
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r $DOCROOT"
+      ;;
+    # php -S 0.0.0.0:$PORT -t <docroot> -> frankenphp php-server
+    "php -S"*"-t "*)
+      DOCROOT=$(echo "$WEB_PROCESS" | sed -E 's/.*-t[[:space:]]+([^[:space:]]+).*/\1/')
+      DOCROOT="${DOCROOT%/}"
+      [ -z "$DOCROOT" ] && DOCROOT="."
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r $DOCROOT"
+      ;;
+    # php -S 0.0.0.0:$PORT (no docroot) -> frankenphp php-server
+    "php -S"*)
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r ."
+      ;;
+    # php artisan serve -> frankenphp php-server -r public (Laravel)
+    *"artisan serve"*)
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r public"
+      ;;
+  esac
+fi
+
+# Output YAML
+cat <<EOF
+---
+addons: []
+config_vars: {}
+default_process_types:
+  web: $WEB_PROCESS
+EOF

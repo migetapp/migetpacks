@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- Back box -->
+  <path d="M14 4L20 7V13L14 16L8 13V7L14 4Z" fill="#A78BFA" stroke="#7C3AED" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M14 10V16M8 7L14 10L20 7" stroke="#7C3AED" stroke-width="1.5" stroke-linejoin="round"/>
+
+  <!-- Front box -->
+  <path d="M10 8L16 11V17L10 20L4 17V11L10 8Z" fill="#7C3AED" stroke="#5B21B6" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M10 14V20M4 11L10 14L16 11" stroke="#5B21B6" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

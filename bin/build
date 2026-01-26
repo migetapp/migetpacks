@@ -1,0 +1,2217 @@
+#!/usr/bin/env bash
+# Main build script for Shipwright integration
+# This script uses Docker-in-Docker with official upstream images
+# Designed to run in miget/container-os (https://hub.docker.com/r/miget/container-os)
+
+# Don't exit on error - we handle errors and always exit 0 for post-build callback
+set +e
+set -o pipefail
+
+# Global error tracking
+BUILD_EXIT_CODE=0
+BUILD_ERROR_MESSAGE=""
+DETECTED_LANGUAGE=""
+
+# Shipwright environment variables
+SOURCE_DIR=${SOURCE_DIR:-"/workspace/source"}
+OUTPUT_IMAGE=${OUTPUT_IMAGE:-""}
+LANGUAGE=${LANGUAGE:-""}
+BUILD_COMMAND=${BUILD_COMMAND:-""}
+RUN_COMMAND=${RUN_COMMAND:-""}
+PORT=${PORT:-5000}
+ARCH=${ARCH:-"x86_64"}
+CACHE_IMAGE=${CACHE_IMAGE:-""}  # Registry image for BuildKit cache (e.g., registry.io/myapp:cache)
+MIX_ENV=${MIX_ENV:-"prod"}      # Elixir/Phoenix environment (prod, dev, test)
+BUNDLE_WITHOUT=${BUNDLE_WITHOUT:-"development test"}  # Ruby: groups to exclude (empty string for all gems)
+PROJECT_PATH=${PROJECT_PATH:-""}  # Subdirectory within SOURCE_DIR for monorepo support
+DOCKERFILE_PATH=${DOCKERFILE_PATH:-""}  # Custom Dockerfile path (relative to PROJECT_PATH or absolute)
+COMPOSE_FILE=${COMPOSE_FILE:-""}  # Custom compose file path (relative to PROJECT_PATH or absolute)
+RESULT_FILE=${RESULT_FILE:-""}  # Path to write build results JSON (for Shipwright post-build steps)
+CUSTOM_DATA=${CUSTOM_DATA:-""}  # Custom JSON data to include in result file
+USE_DHI=${USE_DHI:-"false"}  # Use Docker Hardened Images (dhi.io) when true, official images when false
+DEBUG=${DEBUG:-""}  # Set to "1" for verbose buildx output
+CACHE_KEY=${CACHE_KEY:-""}  # App identifier for S3 package cache (review apps share parent's cache)
+NO_CACHE=${NO_CACHE:-"false"}  # Force fresh build with --no-cache, skip cache-from but still export to cache-to
+CACHE_MODE=${CACHE_MODE:-"min"}  # BuildKit cache mode: "min" (default, smaller) or "max" (all layers)
+CACHE_FROM=${CACHE_FROM:-""}  # Additional read-only cache sources (comma-separated registry refs)
+BUILDPACKS=${BUILDPACKS:-""}  # Explicit buildpack order (e.g., "ruby,python,nodejs" - first is primary)
+
+# Filter for buildx output - suppress non-actionable warnings, indent output
+filter_buildx_output() {
+  grep --line-buffered -v 'WARNING: current commit information was not captured by the build' \
+    | grep --line-buffered -v 'warnings found (use docker --debug to expand)' \
+    | sed -u 's/^/       /'
+}
+
+# Auto-detect whether to push or load based on OUTPUT_IMAGE
+# If image ends with ":local", load locally only (never push)
+# Otherwise, push to registry by default
+if [ -z "${PUSH_IMAGE:-}" ]; then
+  if [[ "$OUTPUT_IMAGE" == *":local" ]]; then
+    PUSH_IMAGE="false"
+  else
+    PUSH_IMAGE="true"
+  fi
+fi
+
+# Go-specific environment variables
+GO_INSTALL_PACKAGE_SPEC=${GO_INSTALL_PACKAGE_SPEC:-""}  # Go packages to install (e.g., "./cmd/...")
+GO_LINKER_SYMBOL=${GO_LINKER_SYMBOL:-""}  # Linker symbol for -ldflags (e.g., "main.version")
+GO_LINKER_VALUE=${GO_LINKER_VALUE:-""}    # Value for linker symbol
+GO_INSTALL_TOOLS_IN_IMAGE=${GO_INSTALL_TOOLS_IN_IMAGE:-"false"}  # Include Go toolchain in final image
+GO_SETUP_GOPATH_IN_IMAGE=${GO_SETUP_GOPATH_IN_IMAGE:-"false"}    # Include GOPATH in final image
+GO_BUILD_FLAGS=${GO_BUILD_FLAGS:-""}  # Additional go build flags
+
+# Scala/sbt-specific environment variables
+SBT_TASKS=${SBT_TASKS:-"compile stage"}  # sbt tasks to run (default: compile stage)
+SBT_PRE_TASKS=${SBT_PRE_TASKS:-""}       # Deprecated: prepend tasks before compilation
+SBT_PROJECT=${SBT_PROJECT:-""}           # sbt project for multi-project builds
+SBT_CLEAN=${SBT_CLEAN:-"false"}          # Run sbt clean before build
+SBT_OPTS=${SBT_OPTS:-""}                 # JVM options for sbt
+SBT_AT_RUNTIME=${SBT_AT_RUNTIME:-"false"} # Make sbt available at runtime
+KEEP_SBT_CACHE=${KEEP_SBT_CACHE:-"false"} # Keep sbt cache in final image
+
+# Clojure/Leiningen-specific environment variables
+LEIN_VERSION=${LEIN_VERSION:-""}           # Leiningen version (auto-detected)
+LEIN_BUILD_TASK=${LEIN_BUILD_TASK:-""}     # Build task (default: uberjar if uberjar-name defined)
+LEIN_INCLUDE_IN_SLUG=${LEIN_INCLUDE_IN_SLUG:-"false"} # Keep lein in final image
+
+# Known builder configuration variables (not passed through to Dockerfile)
+# Any env var NOT matching these patterns will be added as ENV in the build stage
+KNOWN_BUILDER_VARS=(
+  # Builder config
+  "SOURCE_DIR" "OUTPUT_IMAGE" "LANGUAGE" "BUILD_COMMAND" "RUN_COMMAND" "PORT" "ARCH"
+  "CACHE_IMAGE" "CACHE_REGISTRY_INSECURE" "MIX_ENV" "BUNDLE_WITHOUT" "PROJECT_PATH" "DOCKERFILE_PATH" "COMPOSE_FILE"
+  "RESULT_FILE" "CUSTOM_DATA" "USE_DHI" "DEBUG" "CACHE_KEY" "NO_CACHE" "CACHE_MODE" "CACHE_FROM" "BUILDPACKS" "PUSH_IMAGE"
+  "REGISTRY_MIRROR" "BUILDKIT_HOST" "BUILDPACK_DIR"
+  # Go vars
+  "GO_INSTALL_PACKAGE_SPEC" "GO_LINKER_SYMBOL" "GO_LINKER_VALUE" "GO_INSTALL_TOOLS_IN_IMAGE"
+  "GO_SETUP_GOPATH_IN_IMAGE" "GO_BUILD_FLAGS"
+  # Scala/sbt vars
+  "SBT_TASKS" "SBT_PRE_TASKS" "SBT_PROJECT" "SBT_CLEAN" "SBT_OPTS" "SBT_AT_RUNTIME" "KEEP_SBT_CACHE"
+  # Clojure vars
+  "LEIN_VERSION" "LEIN_BUILD_TASK" "LEIN_INCLUDE_IN_SLUG"
+  # S3 cache vars
+  "S3_CACHE_BUCKET" "S3_CACHE_ENDPOINT" "S3_CACHE_REGION"
+  # AWS credentials (never expose)
+  "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_SESSION_TOKEN" "AWS_REGION" "AWS_DEFAULT_REGION"
+  # Docker/system vars
+  "DOCKER_HOST" "DOCKER_PLATFORM" "DOCKER_BUILDKIT" "DOCKER_CONFIG" "STORAGE_DRIVER"
+  # Internal vars
+  "BUILD_EXIT_CODE" "BUILD_ERROR_MESSAGE" "DETECTED_LANGUAGE" "CACHE_FLAGS"
+  # Shell/system vars (never pass through)
+  "PATH" "HOME" "PWD" "OLDPWD" "SHLVL" "_" "HOSTNAME" "TERM" "SHELL" "USER" "LOGNAME"
+  "LANG" "LC_ALL" "LC_CTYPE" "TZ" "EDITOR" "VISUAL" "PAGER" "LESS" "LS_COLORS"
+  "XDG_.*" "SSH_.*" "GPG_.*" "DISPLAY" "COLORTERM" "TMPDIR" "TEMP" "TMP"
+)
+
+# Inject custom environment variables into Dockerfile
+# Any env var not in KNOWN_BUILDER_VARS will be added as ENV
+inject_custom_env_vars() {
+  local dockerfile="$1"
+  local has_custom_vars=false
+  local custom_vars=""
+
+  while IFS='=' read -r name value; do
+    # Skip empty names
+    [ -z "$name" ] && continue
+
+    # Check if this is a known var
+    local is_known=false
+    for pattern in "${KNOWN_BUILDER_VARS[@]}"; do
+      if [[ "$name" =~ ^${pattern}$ ]]; then
+        is_known=true
+        break
+      fi
+    done
+
+    # If not known, add it
+    if [ "$is_known" = false ]; then
+      # Escape special characters in value for Dockerfile
+      local escaped_value="${value//\\/\\\\}"
+      escaped_value="${escaped_value//\"/\\\"}"
+      escaped_value="${escaped_value//\$/\\\$}"
+      custom_vars+="ENV ${name}=\"${escaped_value}\"\n"
+      has_custom_vars=true
+    fi
+  done < <(env)
+
+  if [ "$has_custom_vars" = true ]; then
+    echo "" >> "$dockerfile"
+    echo "# Custom build environment variables" >> "$dockerfile"
+    echo -e "$custom_vars" >> "$dockerfile"
+  fi
+}
+
+# Set Docker platform based on architecture
+case "$ARCH" in
+  x86_64|amd64)
+    DOCKER_PLATFORM="linux/amd64"
+    ;;
+  arm64|aarch64)
+    DOCKER_PLATFORM="linux/arm64"
+    ;;
+  *)
+    DOCKER_PLATFORM="linux/amd64"
+    ;;
+esac
+
+# Build cache flags for BuildKit
+# NO_CACHE=true: force fresh build (--no-cache), skip cache-from, but still export to cache-to
+CACHE_FLAGS=""
+if [ -n "$S3_CACHE_BUCKET" ] && [ -n "$S3_CACHE_ENDPOINT" ] && [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+  # S3 cache backend (for concurrent builds, use_path_style for rook-ceph/minio)
+  S3_REGION="${S3_CACHE_REGION:-us-east-1}"
+  if [ "${NO_CACHE:-false}" = "true" ]; then
+    # Fresh build: --no-cache + export only (no import)
+    CACHE_FLAGS="--no-cache --cache-to type=s3,region=${S3_REGION},bucket=${S3_CACHE_BUCKET},endpoint_url=${S3_CACHE_ENDPOINT},access_key_id=${AWS_ACCESS_KEY_ID},secret_access_key=${AWS_SECRET_ACCESS_KEY},use_path_style=true,mode=${CACHE_MODE},ignore-error=true"
+  else
+    CACHE_FLAGS="--cache-from type=s3,region=${S3_REGION},bucket=${S3_CACHE_BUCKET},endpoint_url=${S3_CACHE_ENDPOINT},access_key_id=${AWS_ACCESS_KEY_ID},secret_access_key=${AWS_SECRET_ACCESS_KEY},use_path_style=true"
+    CACHE_FLAGS="$CACHE_FLAGS --cache-to type=s3,region=${S3_REGION},bucket=${S3_CACHE_BUCKET},endpoint_url=${S3_CACHE_ENDPOINT},access_key_id=${AWS_ACCESS_KEY_ID},secret_access_key=${AWS_SECRET_ACCESS_KEY},use_path_style=true,mode=${CACHE_MODE},ignore-error=true"
+  fi
+elif [ -n "$CACHE_IMAGE" ]; then
+  # Registry cache backend
+  # Support insecure (HTTP) registries like internal miget-cache
+  INSECURE_FLAG=""
+  if [ "${CACHE_REGISTRY_INSECURE:-false}" = "true" ]; then
+    INSECURE_FLAG=",registry.insecure=true"
+  fi
+  if [ "${NO_CACHE:-false}" = "true" ]; then
+    # Fresh build: --no-cache + export only (no import)
+    CACHE_FLAGS="--no-cache --cache-to type=registry,ref=${CACHE_IMAGE},mode=${CACHE_MODE},ignore-error=true${INSECURE_FLAG}"
+  else
+    CACHE_FLAGS="--cache-from type=registry,ref=${CACHE_IMAGE}${INSECURE_FLAG} --cache-to type=registry,ref=${CACHE_IMAGE},mode=${CACHE_MODE},ignore-error=true${INSECURE_FLAG}"
+  fi
+elif [ "${NO_CACHE:-false}" = "true" ]; then
+  # No cache backend configured, but NO_CACHE requested - just add --no-cache
+  CACHE_FLAGS="--no-cache"
+fi
+
+# Append additional read-only cache sources (skipped when NO_CACHE=true)
+if [ -n "$CACHE_FROM" ] && [ "${NO_CACHE:-false}" != "true" ]; then
+  INSECURE_EXTRA=""
+  if [ "${CACHE_REGISTRY_INSECURE:-false}" = "true" ]; then
+    INSECURE_EXTRA=",registry.insecure=true"
+  fi
+  IFS=',' read -ra EXTRA_CACHES <<< "$CACHE_FROM"
+  for ref in "${EXTRA_CACHES[@]}"; do
+    ref=$(echo "$ref" | xargs)  # trim whitespace
+    if [ -n "$ref" ]; then
+      CACHE_FLAGS="$CACHE_FLAGS --cache-from type=registry,ref=${ref}${INSECURE_EXTRA}"
+    fi
+  done
+fi
+
+# Enable BuildKit cache mounts only when BUILD_CACHE_DIR is set (persistent storage)
+# Without persistent storage, cache mounts are ephemeral and useless
+# They can also interfere with registry layer caching
+if [ -n "$BUILD_CACHE_DIR" ]; then
+  export USE_CACHE_MOUNTS="true"
+else
+  export USE_CACHE_MOUNTS="false"
+fi
+
+# Per-app cache ID for BuildKit --mount=type=cache
+# Uses CACHE_KEY to isolate caches per-app (review apps share parent's cache)
+# Format: {cache-key}-{type} e.g. "myapp-npm", "myapp-pip"
+get_cache_id() {
+  local type="$1"
+  if [ -n "$CACHE_KEY" ]; then
+    echo "${CACHE_KEY}-${type}"
+  else
+    echo "default-${type}"
+  fi
+}
+
+# S3 package cache functions (per-app cache)
+# Downloads/uploads package manager caches to S3 for cross-pod sharing
+download_s3_cache() {
+  if [ -z "$CACHE_KEY" ] || [ -z "$S3_CACHE_BUCKET" ] || [ -z "$S3_CACHE_ENDPOINT" ]; then
+    return 0
+  fi
+
+  local cache_dir="$1"
+  local s3_url="${S3_CACHE_ENDPOINT}/${S3_CACHE_BUCKET}/packages/${CACHE_KEY}/cache.tar.gz"
+
+  mkdir -p "$cache_dir"
+
+  if curl -sf --max-time 60 "$s3_url" -o /tmp/s3-cache.tar.gz 2>/dev/null; then
+    tar -xzf /tmp/s3-cache.tar.gz -C "$cache_dir" 2>/dev/null || true
+    rm -f /tmp/s3-cache.tar.gz
+    local size=$(du -sh "$cache_dir" 2>/dev/null | cut -f1)
+    info "Package cache restored from S3 ($size)"
+  fi
+}
+
+upload_s3_cache() {
+  if [ -z "$CACHE_KEY" ] || [ -z "$S3_CACHE_BUCKET" ] || [ -z "$S3_CACHE_ENDPOINT" ]; then
+    return 0
+  fi
+
+  local cache_dir="$1"
+
+  if [ ! -d "$cache_dir" ] || [ -z "$(ls -A "$cache_dir" 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  local s3_url="${S3_CACHE_ENDPOINT}/${S3_CACHE_BUCKET}/packages/${CACHE_KEY}/cache.tar.gz"
+
+  # Create tarball
+  tar -czf /tmp/s3-cache.tar.gz -C "$cache_dir" . 2>/dev/null || return 0
+
+  # Upload using AWS signature v2
+  local date_value=$(date -R)
+  local content_type="application/x-gzip"
+  local resource="/${S3_CACHE_BUCKET}/packages/${CACHE_KEY}/cache.tar.gz"
+  local string_to_sign="PUT\n\n${content_type}\n${date_value}\n${resource}"
+  local signature=$(echo -en "$string_to_sign" | openssl sha1 -hmac "$AWS_SECRET_ACCESS_KEY" -binary | base64)
+
+  if curl -sf --max-time 120 -X PUT \
+    -H "Date: $date_value" \
+    -H "Content-Type: $content_type" \
+    -H "Authorization: AWS ${AWS_ACCESS_KEY_ID}:${signature}" \
+    --data-binary @/tmp/s3-cache.tar.gz \
+    "$s3_url" 2>/dev/null; then
+    local size=$(du -sh "$cache_dir" 2>/dev/null | cut -f1)
+    info "Package cache saved to S3 ($size)"
+  fi
+
+  rm -f /tmp/s3-cache.tar.gz
+}
+
+# Extract cache from built image for S3 upload
+extract_cache_from_image() {
+  local image="$1"
+  local cache_dir="$2"
+
+  if [ -z "$CACHE_KEY" ]; then
+    return 0
+  fi
+
+  mkdir -p "$cache_dir"
+
+  # Create temp container and extract cache
+  local container_id=$(docker create "$image" 2>/dev/null) || return 0
+
+  # Extract each cache directory if it exists
+  for cache_type in npm yarn pnpm pip uv bundle go cargo maven gradle composer; do
+    docker cp "$container_id:/cache/${cache_type}" "$cache_dir/" 2>/dev/null || true
+  done
+
+  docker rm "$container_id" >/dev/null 2>&1 || true
+}
+
+# Buildpack directory
+BUILDPACK_DIR=${BUILDPACK_DIR:-"/buildpack"}
+
+# Source common functions and language libraries
+source "$BUILDPACK_DIR/lib/common.sh"
+source "$BUILDPACK_DIR/lib/nodejs.sh"
+source "$BUILDPACK_DIR/lib/ruby.sh"
+source "$BUILDPACK_DIR/lib/python.sh"
+source "$BUILDPACK_DIR/lib/dotnet.sh"
+source "$BUILDPACK_DIR/lib/java.sh"
+source "$BUILDPACK_DIR/lib/kotlin.sh"
+source "$BUILDPACK_DIR/lib/scala.sh"
+source "$BUILDPACK_DIR/lib/clojure.sh"
+source "$BUILDPACK_DIR/lib/go.sh"
+source "$BUILDPACK_DIR/lib/php.sh"
+source "$BUILDPACK_DIR/lib/rust.sh"
+source "$BUILDPACK_DIR/lib/elixir.sh"
+source "$BUILDPACK_DIR/lib/deno.sh"
+source "$BUILDPACK_DIR/lib/bun.sh"
+source "$BUILDPACK_DIR/lib/buildpacks.sh"
+
+# Handle build failure - write result and exit
+# If RESULT_FILE is set, exit 0 for Shipwright post-build callbacks
+# Otherwise exit with actual error code for CI/CD pipelines
+handle_build_failure() {
+  local exit_code=$1
+  local error_msg=$2
+
+  BUILD_EXIT_CODE=$exit_code
+  BUILD_ERROR_MESSAGE="$error_msg"
+
+  # Calculate build time
+  local build_end
+  build_end=$(date +%s)
+  local build_time=$((build_end - BUILD_START))
+
+  # Determine language for result (use detected or empty)
+  local lang="${DETECTED_LANGUAGE:-unknown}"
+
+  echo ""
+  error "$error_msg"
+
+  # Write failure result
+  write_result_file "$build_time" "$lang" "failed" "$exit_code" "$error_msg"
+
+  # If RESULT_FILE is set, exit 0 so post-build callback runs (Shipwright)
+  # Otherwise exit with actual error code (GitHub Actions, etc.)
+  if [ -n "$RESULT_FILE" ]; then
+    exit 0
+  else
+    exit "$exit_code"
+  fi
+}
+
+# Run a command and handle failure
+run_or_fail() {
+  local error_context=$1
+  shift
+  local output
+  output=$("$@" 2>&1)
+  local exit_code=$?
+  if [ $exit_code -ne 0 ]; then
+    handle_build_failure $exit_code "$error_context: $output"
+  fi
+  echo "$output"
+}
+
+# Array to track built images for result file
+BUILT_IMAGES_JSON="[]"
+
+# JSON object to store Procfile processes
+PROCFILE_PROCESSES_JSON="{}"
+
+# Parse all processes from Procfile into JSON
+# Structure: { "web": "...", "release": "...", "workers": [{"name": "...", "command": "..."}] }
+parse_procfile() {
+  local procfile=$1
+  local web_cmd=""
+  local release_cmd=""
+  local workers_json="[]"
+
+  if [ ! -f "$procfile" ]; then
+    echo "{}"
+    return
+  fi
+
+  # Read Procfile and extract all process types
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+    # Match process_name: command
+    if [[ "$line" =~ ^([a-zA-Z_][a-zA-Z0-9_]*):(.*)$ ]]; then
+      local name="${BASH_REMATCH[1]}"
+      local command="${BASH_REMATCH[2]}"
+      # Trim leading whitespace from command
+      command="${command#"${command%%[![:space:]]*}"}"
+
+      case "$name" in
+        web)
+          web_cmd="$command"
+          ;;
+        release)
+          release_cmd="$command"
+          ;;
+        *)
+          # All other processes are workers
+          workers_json=$(echo "$workers_json" | jq -c \
+            --arg name "$name" \
+            --arg cmd "$command" \
+            '. + [{"name": $name, "command": $cmd}]')
+          ;;
+      esac
+    fi
+  done < "$procfile"
+
+  # Build final JSON
+  local result="{}"
+  if [ -n "$web_cmd" ]; then
+    result=$(echo "$result" | jq -c --arg cmd "$web_cmd" '. + {web: $cmd}')
+  fi
+  if [ -n "$release_cmd" ]; then
+    result=$(echo "$result" | jq -c --arg cmd "$release_cmd" '. + {release: $cmd}')
+  fi
+  if [ "$workers_json" != "[]" ]; then
+    result=$(echo "$result" | jq -c --argjson workers "$workers_json" '. + {workers: $workers}')
+  fi
+
+  echo "$result"
+}
+
+# JSON objects to store app.json data
+APP_JSON_ENV="{}"
+APP_JSON_FORMATION="{}"
+APP_JSON_SCRIPTS="{}"
+APP_JSON_BUILDPACKS="[]"
+
+# Map buildpack names to language identifiers
+map_buildpack_name() {
+  local buildpack=$1
+
+  case "$buildpack" in
+    # Direct language names
+    ruby|nodejs|node|python|go|golang|java|scala|clojure|kotlin|php|rust|elixir|deno|bun|dotnet)
+      echo "$buildpack"
+      ;;
+    # Prefixed buildpack names (pass through)
+    */ruby|*/nodejs|*/python|*/go|*/java|*/scala|*/clojure|*/php|*/kotlin|*/rust|*/elixir|*/deno|*/bun|*/dotnet)
+      echo "${buildpack##*/}"
+      ;;
+    */node)
+      echo "nodejs"
+      ;;
+    */gradle)
+      echo "kotlin"
+      ;;
+    *)
+      # Unknown buildpack, return empty
+      echo ""
+      ;;
+  esac
+}
+
+# Parse app.json and extract relevant fields
+# Sets: APP_JSON_ENV, APP_JSON_FORMATION, APP_JSON_SCRIPTS, APP_JSON_BUILDPACKS
+parse_app_json() {
+  local app_json=$1
+
+  if [ ! -f "$app_json" ]; then
+    return
+  fi
+
+  # Extract env variables as simple key-value object
+  # Format: {"VAR": "value", ...}
+  # Handles both {"VAR": {"value": "x"}} and {"VAR": "value"} formats
+  APP_JSON_ENV=$(jq -c '
+    .env // {} | to_entries | map({
+      key: .key,
+      value: (if .value | type == "object" then (.value.value // null) else .value end)
+    }) | from_entries
+  ' "$app_json" 2>/dev/null || echo "{}")
+
+  # Store generators separately for secret generation
+  APP_JSON_ENV_GENERATORS=$(jq -c '
+    .env // {} | to_entries |
+    [ .[] | select(.value | type == "object") | select(.value.generator) | {(.key): .value.generator} ] |
+    add // {}
+  ' "$app_json" 2>/dev/null || echo "{}")
+
+  # Extract formation (process types with quantity/size)
+  # Format: {"web": {"quantity": 1, "size": "standard-1x"}}
+  APP_JSON_FORMATION=$(jq -c '
+    .formation // {} | to_entries | map({
+      name: .key,
+      quantity: (.value.quantity // 1),
+      size: (.value.size // null)
+    })
+  ' "$app_json" 2>/dev/null || echo "[]")
+
+  # Extract scripts (postdeploy, pr-predestroy)
+  # Format: {"postdeploy": "command"} or {"postdeploy": {"command": "...", "size": "..."}}
+  APP_JSON_SCRIPTS=$(jq -c '
+    .scripts // {} | to_entries | map(
+      if .value | type == "object" then
+        {
+          name: .key,
+          command: .value.command,
+          size: (.value.size // null)
+        }
+      else
+        {
+          name: .key,
+          command: .value,
+          size: null
+        }
+      end
+    )
+  ' "$app_json" 2>/dev/null || echo "[]")
+
+  # Extract buildpacks
+  # Format: [{"url": "heroku/ruby"}]
+  APP_JSON_BUILDPACKS=$(jq -c '
+    .buildpacks // [] | map(.url // .)
+  ' "$app_json" 2>/dev/null || echo "[]")
+}
+
+# Generate secret token (for app.json generator: "secret")
+generate_secret() {
+  openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p
+}
+
+# Detect exposed ports from a Docker image
+detect_ports() {
+  local image=$1
+  local ports_json
+
+  # Get exposed ports from image config
+  ports_json=$(docker inspect "$image" --format='{{json .Config.ExposedPorts}}' 2>/dev/null || echo "")
+
+  # Handle null, empty, or invalid JSON
+  if [ -z "$ports_json" ] || [ "$ports_json" = "null" ]; then
+    echo "[]"
+    return
+  fi
+
+  # Convert {"5000/tcp":{},"8080/tcp":{}} to ["5000/tcp","8080/tcp"]
+  # Ensure 5000/tcp is first (primary app port), then other ports
+  # If jq fails, return empty array
+  echo "$ports_json" | jq -c 'keys | (map(select(startswith("5000/"))) + map(select(startswith("5000/") | not))) | unique' 2>/dev/null || echo "[]"
+}
+
+# Add image to results array
+add_image_result() {
+  local image=$1
+  local ports_json
+
+  ports_json=$(detect_ports "$image")
+
+  # Validate ports_json is valid JSON array, default to empty array if not
+  if ! echo "$ports_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    ports_json="[]"
+  fi
+
+  # Print detected ports
+  if [ "$ports_json" != "[]" ]; then
+    local ports_list
+    ports_list=$(echo "$ports_json" | jq -r 'join(", ")' 2>/dev/null || echo "")
+    if [ -n "$ports_list" ]; then
+      info "Exposed ports: $ports_list"
+    fi
+  fi
+
+  # Parse image into components: registry/repository:tag
+  local image_without_tag="${image%:*}"
+  local tag="${image##*:}"
+  local registry="${image_without_tag%%/*}"
+  local repository="${image_without_tag#*/}"
+
+  # Add to results array with parsed components
+  BUILT_IMAGES_JSON=$(echo "$BUILT_IMAGES_JSON" | jq -c \
+    --arg name "$image" \
+    --arg registry "$registry" \
+    --arg repository "$repository" \
+    --arg tag "$tag" \
+    --argjson ports "$ports_json" \
+    '. + [{"name": $name, "registry": $registry, "repository": $repository, "tag": $tag, "ports": $ports}]' 2>/dev/null || echo "$BUILT_IMAGES_JSON")
+}
+
+# Write build results to file
+# Args: build_time language [status] [exit_code] [error_message]
+write_result_file() {
+  local build_time=$1
+  local language=$2
+  local status=${3:-"success"}
+  local exit_code=${4:-0}
+  local error_message=${5:-""}
+
+  if [ -z "$RESULT_FILE" ]; then
+    return
+  fi
+
+  # Ensure parent directory exists
+  mkdir -p "$(dirname "$RESULT_FILE")"
+
+  # Generate base result JSON
+  local result_json
+  result_json=$(jq -n \
+    --argjson images "$BUILT_IMAGES_JSON" \
+    --argjson processes "$PROCFILE_PROCESSES_JSON" \
+    --arg build_time "$build_time" \
+    --arg language "$language" \
+    --arg status "$status" \
+    --arg exit_code "$exit_code" \
+    --arg error_message "$error_message" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      status: $status,
+      exit_code: ($exit_code | tonumber),
+      images: $images,
+      processes: $processes,
+      build_time: ($build_time | tonumber),
+      language: $language,
+      timestamp: $timestamp
+    } + (if $error_message != "" then {error: $error_message} else {} end)')
+
+  # Add app.json env variables if available (simple key-value object)
+  if [ "$APP_JSON_ENV" != "{}" ]; then
+    result_json=$(echo "$result_json" | jq --argjson env "$APP_JSON_ENV" '. + {env: $env}')
+  fi
+
+  # Add app.json formation (replicas) if available
+  if [ "$APP_JSON_FORMATION" != "[]" ]; then
+    result_json=$(echo "$result_json" | jq --argjson formation "$APP_JSON_FORMATION" '. + {formation: $formation}')
+  fi
+
+  # Add app.json scripts if available
+  if [ "$APP_JSON_SCRIPTS" != "[]" ]; then
+    result_json=$(echo "$result_json" | jq --argjson scripts "$APP_JSON_SCRIPTS" '. + {scripts: $scripts}')
+  fi
+
+  # Merge custom data if provided
+  if [ -n "$CUSTOM_DATA" ]; then
+    result_json=$(echo "$result_json" | jq --argjson custom "$CUSTOM_DATA" '. + {custom: $custom}')
+  fi
+
+  echo "$result_json" > "$RESULT_FILE"
+}
+
+# Record build start time (before validation so we can track time even for failures)
+BUILD_START=$(date +%s)
+
+# Validate inputs
+if [ -z "$OUTPUT_IMAGE" ]; then
+  handle_build_failure 1 "OUTPUT_IMAGE environment variable is required"
+fi
+
+if [ ! -d "$SOURCE_DIR" ]; then
+  handle_build_failure 1 "SOURCE_DIR does not exist: $SOURCE_DIR"
+fi
+
+header "Migetpacks Build"
+info ""
+info "Output image: $OUTPUT_IMAGE"
+info "Platform:     $DOCKER_PLATFORM"
+if [ -n "$CACHE_IMAGE" ]; then
+  info "Cache:        $CACHE_IMAGE"
+fi
+if [ -n "$PROJECT_PATH" ]; then
+  info "Project path: $PROJECT_PATH"
+fi
+if [ -n "$DOCKERFILE_PATH" ]; then
+  info "Dockerfile:   $DOCKERFILE_PATH"
+fi
+info ""
+
+# Create build directory
+BUILD_DIR="/tmp/build"
+mkdir -p "$BUILD_DIR"
+
+# Determine effective source directory (handle PROJECT_PATH for monorepo)
+EFFECTIVE_SOURCE_DIR="$SOURCE_DIR"
+if [ -n "$PROJECT_PATH" ]; then
+  EFFECTIVE_SOURCE_DIR="${SOURCE_DIR%/}/${PROJECT_PATH#/}"
+  if [ ! -d "$EFFECTIVE_SOURCE_DIR" ]; then
+    handle_build_failure 1 "PROJECT_PATH does not exist: $EFFECTIVE_SOURCE_DIR"
+  fi
+fi
+
+# No longer copy source - use it directly as build context (much faster)
+# BUILD_DIR is only used for generated Dockerfiles
+
+# Create .dockerignore in source to speed up build context (exclude large/unnecessary files)
+# Only create if one doesn't exist - respect user's .dockerignore
+# Skip if source is read-only (e.g., Shipwright volume mounts)
+if [ ! -f "$EFFECTIVE_SOURCE_DIR/.dockerignore" ] && [ -w "$EFFECTIVE_SOURCE_DIR" ]; then
+  cat > "$EFFECTIVE_SOURCE_DIR/.dockerignore" <<'DOCKERIGNORE'
+.git
+.github
+.gitignore
+.gitattributes
+node_modules
+vendor/bundle
+__pycache__
+*.pyc
+.bundle
+.cache
+tmp
+log
+.env.local
+.env*.local
+*.log
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo
+coverage
+.nyc_output
+.pytest_cache
+.tox
+htmlcov
+dist
+build
+*.egg-info
+target/debug
+target/release
+deps
+_build
+.elixir_ls
+.mix
+.package-cache
+DOCKERIGNORE
+fi
+
+# Parse app.json if present
+if [ -f "$EFFECTIVE_SOURCE_DIR/app.json" ]; then
+  parse_app_json "$EFFECTIVE_SOURCE_DIR/app.json"
+
+  # Show app.json info
+  if [ "$APP_JSON_ENV" != "[]" ]; then
+    env_count=$(echo "$APP_JSON_ENV" | jq 'length')
+    info "app.json: $env_count env variable(s) defined"
+  fi
+  if [ "$APP_JSON_FORMATION" != "[]" ]; then
+    formation_procs=$(echo "$APP_JSON_FORMATION" | jq -r '.[].name' | tr '\n' ', ' | sed 's/,$//')
+    info "app.json: formation for $formation_procs"
+  fi
+  if [ "$APP_JSON_SCRIPTS" != "[]" ]; then
+    script_names=$(echo "$APP_JSON_SCRIPTS" | jq -r '.[].name' | tr '\n' ', ' | sed 's/,$//')
+    info "app.json: scripts ($script_names)"
+  fi
+
+  # Use buildpacks from app.json to determine language if not set
+  if [ -z "$LANGUAGE" ] && [ "$APP_JSON_BUILDPACKS" != "[]" ]; then
+    # Get the last buildpack (primary language)
+    last_buildpack=$(echo "$APP_JSON_BUILDPACKS" | jq -r '.[-1]')
+    mapped_lang=$(map_buildpack_name "$last_buildpack")
+    if [ -n "$mapped_lang" ]; then
+      LANGUAGE="$mapped_lang"
+      info "app.json: using buildpack $last_buildpack → $LANGUAGE"
+    fi
+  fi
+
+  # Export env variables with values for build context
+  # Generate secrets for variables with generator: "secret"
+  for env_name in $(echo "$APP_JSON_ENV" | jq -r 'keys[]'); do
+    env_value=$(echo "$APP_JSON_ENV" | jq -r --arg k "$env_name" '.[$k] // empty')
+    env_generator=$(echo "$APP_JSON_ENV_GENERATORS" | jq -r --arg k "$env_name" '.[$k] // empty')
+
+    if [ "$env_generator" = "secret" ] && [ -z "$env_value" ]; then
+      env_value=$(generate_secret)
+      # Update the value in APP_JSON_ENV for result file
+      APP_JSON_ENV=$(echo "$APP_JSON_ENV" | jq -c --arg k "$env_name" --arg v "$env_value" '.[$k] = $v')
+    fi
+
+    if [ -n "$env_value" ]; then
+      export "$env_name=$env_value"
+    fi
+  done
+fi
+
+# Parse BUILDPACKS env var for explicit buildpack ordering
+# Format: "ruby,python,nodejs" - first is primary, rest are additional
+ADDITIONAL_BUILDPACKS=()
+if [ -n "$BUILDPACKS" ]; then
+  # Split by comma and process each buildpack
+  IFS=',' read -ra BUILDPACK_LIST <<< "$BUILDPACKS"
+  for i in "${!BUILDPACK_LIST[@]}"; do
+    bp="${BUILDPACK_LIST[$i]}"
+    # Strip whitespace and miget/ prefix
+    bp=$(echo "$bp" | tr -d '[:space:]' | sed 's/^miget\///')
+    # Map heroku buildpack names if needed
+    bp=$(map_buildpack_name "$bp")
+    if [ $i -eq 0 ]; then
+      # First buildpack is primary language
+      LANGUAGE="$bp"
+    else
+      # Rest are additional buildpacks
+      ADDITIONAL_BUILDPACKS+=("$bp")
+    fi
+  done
+  info "BUILDPACKS: primary=$LANGUAGE, additional=${ADDITIONAL_BUILDPACKS[*]:-none}"
+
+  # DHI warning for multi-buildpack
+  if [ "$USE_DHI" = "true" ] && [ ${#ADDITIONAL_BUILDPACKS[@]} -gt 0 ]; then
+    warning "DHI multi-buildpack: additional buildpacks available at BUILD TIME only"
+    warning "Runtime image will only contain ${LANGUAGE} (distroless images are single-runtime)"
+  fi
+fi
+
+# Detect language if not specified
+if [ -z "$LANGUAGE" ]; then
+  DETECTED_LANGUAGE=$(PROJECT_PATH="" "$BUILDPACK_DIR/bin/detect" "$EFFECTIVE_SOURCE_DIR" 2>/dev/null || true)
+  if [ -z "$DETECTED_LANGUAGE" ]; then
+    handle_build_failure 1 "Unable to detect language. Please set LANGUAGE environment variable."
+  fi
+  LANGUAGE="$DETECTED_LANGUAGE"
+fi
+# Store for error handling
+DETECTED_LANGUAGE="$LANGUAGE"
+
+# Normalize language name
+LANG_NORMALIZED=$(echo "$LANGUAGE" | tr '[:upper:]' '[:lower:]' | sed 's/node.js/nodejs/; s/ *(.*//; s/ *$//')
+
+# Handle Dockerfile builds - use user's Dockerfile directly
+if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
+  header "Dockerfile detected"
+
+  # Resolve Dockerfile path (look in source directory, not BUILD_DIR)
+  RESOLVED_DOCKERFILE=""
+  if [ -n "$DOCKERFILE_PATH" ]; then
+    if [ -f "$DOCKERFILE_PATH" ]; then
+      RESOLVED_DOCKERFILE="$DOCKERFILE_PATH"
+    elif [ -f "$EFFECTIVE_SOURCE_DIR/$DOCKERFILE_PATH" ]; then
+      RESOLVED_DOCKERFILE="$EFFECTIVE_SOURCE_DIR/$DOCKERFILE_PATH"
+    else
+      handle_build_failure 1 "DOCKERFILE_PATH not found: $DOCKERFILE_PATH"
+    fi
+  elif [ -f "$EFFECTIVE_SOURCE_DIR/Dockerfile" ]; then
+    RESOLVED_DOCKERFILE="$EFFECTIVE_SOURCE_DIR/Dockerfile"
+  else
+    handle_build_failure 1 "No Dockerfile found"
+  fi
+
+  info "Using: $RESOLVED_DOCKERFILE"
+
+  # Copy Dockerfile to build directory if it's outside (use -ef to check if same file)
+  if [ ! "$RESOLVED_DOCKERFILE" -ef "$BUILD_DIR/Dockerfile" ]; then
+    cp "$RESOLVED_DOCKERFILE" "$BUILD_DIR/Dockerfile"
+    RESOLVED_DOCKERFILE="$BUILD_DIR/Dockerfile"
+  fi
+
+  header "Building"
+
+  cd "$BUILD_DIR"
+
+  # Enable BuildKit for registry caching support
+  export DOCKER_BUILDKIT=1
+
+  # Determine push or load flag
+  BUILD_OUTPUT_FLAG="--push"
+  if [ "$PUSH_IMAGE" = "false" ]; then
+    BUILD_OUTPUT_FLAG="--load"
+  fi
+
+  # Run build and show output directly (no buffering)
+  BUILD_OUTPUT=$(mktemp)
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f Dockerfile -t "$OUTPUT_IMAGE" $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+    build_error=$(tail -20 "$BUILD_OUTPUT")
+    rm -f "$BUILD_OUTPUT"
+    handle_build_failure 1 "Docker build failed: $build_error"
+  fi
+  rm -f "$BUILD_OUTPUT"
+
+  # Pull image for port detection (buildx --push doesn't load locally)
+  docker pull "$OUTPUT_IMAGE" >/dev/null 2>&1 || true
+  add_image_result "$OUTPUT_IMAGE"
+
+  # Calculate build time
+  BUILD_END=$(date +%s)
+  BUILD_TIME=$((BUILD_END - BUILD_START))
+
+  # Write result file if requested
+  write_result_file "$BUILD_TIME" "dockerfile" "success" 0 ""
+
+  echo ""
+  info "Image: $OUTPUT_IMAGE"
+  info "Built in ${BUILD_TIME}s"
+  echo ""
+  exit 0
+fi
+
+# Handle Compose builds - build all services with build sections
+if [ "$LANG_NORMALIZED" = "compose" ]; then
+  header "Compose detected"
+
+  # Resolve compose file path (look in source directory, not BUILD_DIR)
+  RESOLVED_COMPOSE=""
+  if [ -n "$COMPOSE_FILE" ]; then
+    if [ -f "$COMPOSE_FILE" ]; then
+      RESOLVED_COMPOSE="$COMPOSE_FILE"
+    elif [ -f "$EFFECTIVE_SOURCE_DIR/$COMPOSE_FILE" ]; then
+      RESOLVED_COMPOSE="$EFFECTIVE_SOURCE_DIR/$COMPOSE_FILE"
+    else
+      handle_build_failure 1 "COMPOSE_FILE not found: $COMPOSE_FILE"
+    fi
+  else
+    # Auto-detect with priority
+    for compose_name in "compose.yaml" "compose.yml" "docker-compose.yaml" "docker-compose.yml"; do
+      if [ -f "$EFFECTIVE_SOURCE_DIR/$compose_name" ]; then
+        RESOLVED_COMPOSE="$EFFECTIVE_SOURCE_DIR/$compose_name"
+        break
+      fi
+    done
+  fi
+
+  if [ -z "$RESOLVED_COMPOSE" ]; then
+    handle_build_failure 1 "No compose file found"
+  fi
+
+  info "Using: $RESOLVED_COMPOSE"
+
+  # Check if yq is available
+  if ! command -v yq &> /dev/null; then
+    handle_build_failure 1 "yq is required for Compose support but not installed"
+  fi
+
+  # Get services with build sections
+  SERVICES_WITH_BUILD=$(yq eval '.services | to_entries | .[] | select(.value.build) | .key' "$RESOLVED_COMPOSE" 2>/dev/null)
+
+  if [ -z "$SERVICES_WITH_BUILD" ]; then
+    handle_build_failure 1 "No services with 'build' section found in compose file"
+  fi
+
+  # Count services
+  SERVICE_COUNT=$(echo "$SERVICES_WITH_BUILD" | wc -l | tr -d ' ')
+  info "Found $SERVICE_COUNT service(s) with build configuration"
+  info ""
+
+  # Track built images
+  BUILT_IMAGES=""
+  BUILD_FAILURES=0
+
+  cd "$BUILD_DIR"
+
+  # Enable BuildKit
+  export DOCKER_BUILDKIT=1
+
+  # Build each service
+  for SERVICE in $SERVICES_WITH_BUILD; do
+    header "Building service: $SERVICE"
+
+    # Get build context (default to current directory)
+    BUILD_CONTEXT=$(yq eval ".services.${SERVICE}.build.context // \".\"" "$RESOLVED_COMPOSE")
+    # Handle string-only build (e.g., build: ./api)
+    BUILD_TYPE=$(yq eval ".services.${SERVICE}.build | type" "$RESOLVED_COMPOSE")
+    if [ "$BUILD_TYPE" = "!!str" ]; then
+      BUILD_CONTEXT=$(yq eval ".services.${SERVICE}.build" "$RESOLVED_COMPOSE")
+    fi
+
+    # Get Dockerfile path (default to Dockerfile)
+    SERVICE_DOCKERFILE=$(yq eval ".services.${SERVICE}.build.dockerfile // \"Dockerfile\"" "$RESOLVED_COMPOSE")
+
+    # Get build args
+    BUILD_ARGS=""
+    ARGS_YAML=$(yq eval ".services.${SERVICE}.build.args // {}" "$RESOLVED_COMPOSE")
+    if [ "$ARGS_YAML" != "{}" ] && [ "$ARGS_YAML" != "null" ]; then
+      while IFS= read -r arg_line; do
+        if [ -n "$arg_line" ]; then
+          BUILD_ARGS="$BUILD_ARGS --build-arg $arg_line"
+        fi
+      done <<< "$(yq eval ".services.${SERVICE}.build.args | to_entries | .[] | .key + \"=\" + (.value | tostring)" "$RESOLVED_COMPOSE" 2>/dev/null)"
+    fi
+
+    # Generate image name: OUTPUT_IMAGE-{service}
+    SERVICE_IMAGE="${OUTPUT_IMAGE}-${SERVICE}"
+
+    info "Context:    $BUILD_CONTEXT"
+    info "Dockerfile: $SERVICE_DOCKERFILE"
+    info "Image:      $SERVICE_IMAGE"
+    info ""
+
+    # Build the service (resolve context relative to source directory)
+    FULL_BUILD_CONTEXT="$EFFECTIVE_SOURCE_DIR/$BUILD_CONTEXT"
+    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS \
+        -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
+        -t "$SERVICE_IMAGE" --push \
+        "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
+
+      # Pull image for port detection (buildx --push doesn't load locally)
+      docker pull "$SERVICE_IMAGE" >/dev/null 2>&1 || true
+      add_image_result "$SERVICE_IMAGE"
+      success "Built and pushed $SERVICE_IMAGE"
+    else
+      error "Failed to build $SERVICE"
+      BUILD_FAILURES=$((BUILD_FAILURES + 1))
+    fi
+    echo ""
+  done
+
+  # Calculate build time (before push)
+  BUILD_END=$(date +%s)
+  BUILD_TIME=$((BUILD_END - BUILD_START))
+
+  # Write result file if requested
+  if [ $BUILD_FAILURES -eq 0 ]; then
+    write_result_file "$BUILD_TIME" "compose" "success" 0 ""
+  else
+    write_result_file "$BUILD_TIME" "compose" "failed" 1 "$BUILD_FAILURES service(s) failed to build"
+  fi
+
+  echo ""
+  if [ $BUILD_FAILURES -gt 0 ]; then
+    warning "$BUILD_FAILURES build(s) failed"
+  fi
+  info "Built images:"
+  for SERVICE in $SERVICES_WITH_BUILD; do
+    info "  - ${OUTPUT_IMAGE}-${SERVICE}"
+  done
+  info ""
+  info "Built in ${BUILD_TIME}s"
+  echo ""
+
+  # Always exit 0 so post-build callback runs
+  exit 0
+fi
+
+# Multi-buildpack support
+# SECONDARY_LANG kept for backwards compatibility (first additional buildpack if nodejs)
+SECONDARY_LANG=""
+SECONDARY_VERSION=""
+SECONDARY_IMAGE=""
+
+# Arrays for all additional buildpacks
+declare -a ADDITIONAL_LANGS=()
+declare -a ADDITIONAL_VERSIONS=()
+declare -a ADDITIONAL_IMAGES=()
+
+if [ ${#ADDITIONAL_BUILDPACKS[@]} -gt 0 ]; then
+  # Use explicit BUILDPACKS - no auto-detection
+  for bp in "${ADDITIONAL_BUILDPACKS[@]}"; do
+    bp_normalized=$(echo "$bp" | tr '[:upper:]' '[:lower:]' | sed 's/node.js/nodejs/; s/ *(.*//; s/ *$//')
+    bp_version=$(LANGUAGE="$bp_normalized" "$BUILDPACK_DIR/bin/detect-version" "$EFFECTIVE_SOURCE_DIR" 2>/dev/null || echo "latest")
+    ADDITIONAL_LANGS+=("$bp_normalized")
+    ADDITIONAL_VERSIONS+=("$bp_version")
+    # Determine image based on language
+    case "$bp_normalized" in
+      nodejs|node) ADDITIONAL_IMAGES+=("node:${bp_version}") ;;
+      python) ADDITIONAL_IMAGES+=("python:${bp_version}") ;;
+      ruby) ADDITIONAL_IMAGES+=("ruby:${bp_version}") ;;
+      go|golang) ADDITIONAL_IMAGES+=("golang:${bp_version}") ;;
+      *) ADDITIONAL_IMAGES+=("${bp_normalized}:${bp_version}") ;;
+    esac
+  done
+  # Set SECONDARY_LANG for backwards compatibility (first additional if nodejs)
+  if [ "${ADDITIONAL_LANGS[0]}" = "nodejs" ] || [ "${ADDITIONAL_LANGS[0]}" = "node" ]; then
+    SECONDARY_LANG="nodejs"
+    SECONDARY_VERSION="${ADDITIONAL_VERSIONS[0]}"
+    SECONDARY_IMAGE="${ADDITIONAL_IMAGES[0]}"
+  fi
+else
+  # Auto-detect Node.js as secondary (common for asset compilation)
+  # Exclude runtimes that handle npm packages natively: nodejs, node, bun, deno
+  if [ "$LANG_NORMALIZED" != "nodejs" ] && [ "$LANG_NORMALIZED" != "node" ] && \
+     [ "$LANG_NORMALIZED" != "bun" ] && [ "$LANG_NORMALIZED" != "deno" ]; then
+    if [ -f "$EFFECTIVE_SOURCE_DIR/package.json" ]; then
+      SECONDARY_LANG="nodejs"
+      SECONDARY_VERSION=$(LANGUAGE=nodejs "$BUILDPACK_DIR/bin/detect-version" "$EFFECTIVE_SOURCE_DIR")
+      SECONDARY_IMAGE="node:${SECONDARY_VERSION}"
+      ADDITIONAL_LANGS+=("nodejs")
+      ADDITIONAL_VERSIONS+=("$SECONDARY_VERSION")
+      ADDITIONAL_IMAGES+=("$SECONDARY_IMAGE")
+    fi
+  fi
+fi
+
+# Get version for building with official image
+VERSION=$(LANGUAGE="$LANG_NORMALIZED" "$BUILDPACK_DIR/bin/detect-version" "$EFFECTIVE_SOURCE_DIR")
+
+# Show detected buildpacks
+if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ]; then
+  header "Using buildpacks"
+  info "1. miget/${LANG_NORMALIZED} (primary)"
+  bp_num=2
+  for i in "${!ADDITIONAL_LANGS[@]}"; do
+    info "${bp_num}. miget/${ADDITIONAL_LANGS[$i]}"
+    bp_num=$((bp_num + 1))
+  done
+fi
+
+header "$LANGUAGE app detected"
+
+header "Resolving versions"
+info "$LANGUAGE $VERSION"
+for i in "${!ADDITIONAL_LANGS[@]}"; do
+  info "${ADDITIONAL_LANGS[$i]} ${ADDITIONAL_VERSIONS[$i]}"
+done
+
+# Detect and display package manager for Node.js builds (primary or secondary)
+if [ "$LANG_NORMALIZED" = "nodejs" ] || [ "$LANG_NORMALIZED" = "node" ] || [ -n "$SECONDARY_LANG" ]; then
+  nodejs_detect_pkg_manager "$EFFECTIVE_SOURCE_DIR"
+  if [ -n "$NODEJS_PKG_MANAGER" ]; then
+    info "Package manager: $NODEJS_PKG_MANAGER"
+  fi
+  if [ "$NODEJS_MULTIPLE_LOCKFILES" = "true" ]; then
+    warning "Multiple lockfiles detected - using $NODEJS_PKG_MANAGER"
+    warning "Remove unused lockfiles (package-lock.json, yarn.lock, pnpm-lock.yaml)"
+  fi
+fi
+
+# Detect web process from Procfile or language defaults
+WEB_PROCESS=""
+PROCESS_SOURCE=""
+
+if [ -n "$RUN_COMMAND" ]; then
+  WEB_PROCESS="$RUN_COMMAND"
+  PROCESS_SOURCE="(from RUN_COMMAND)"
+elif [ -f "$EFFECTIVE_SOURCE_DIR/Procfile" ]; then
+  # Parse all processes from Procfile
+  PROCFILE_PROCESSES_JSON=$(parse_procfile "$EFFECTIVE_SOURCE_DIR/Procfile")
+
+  # Get web process
+  PROCFILE_WEB=$(grep -E "^web:" "$EFFECTIVE_SOURCE_DIR/Procfile" 2>/dev/null | sed 's/^web:[[:space:]]*//' | head -1 || true)
+  if [ -n "$PROCFILE_WEB" ]; then
+    WEB_PROCESS="$PROCFILE_WEB"
+    PROCESS_SOURCE="(from Procfile)"
+  else
+    # No web process, use first process
+    PROCFILE_FIRST=$(grep -E "^[a-zA-Z_][a-zA-Z0-9_]*:" "$EFFECTIVE_SOURCE_DIR/Procfile" 2>/dev/null | head -1 || true)
+    if [ -n "$PROCFILE_FIRST" ]; then
+      PROCESS_NAME=$(echo "$PROCFILE_FIRST" | cut -d: -f1)
+      WEB_PROCESS=$(echo "$PROCFILE_FIRST" | sed 's/^[^:]*:[[:space:]]*//')
+      PROCESS_SOURCE="(from Procfile: $PROCESS_NAME)"
+    fi
+  fi
+fi
+
+# Fallback to language defaults from release script
+if [ -z "$WEB_PROCESS" ]; then
+  RELEASE_YAML=$(PROJECT_PATH="" "$BUILDPACK_DIR/bin/release" "$EFFECTIVE_SOURCE_DIR")
+  WEB_PROCESS=$(echo "$RELEASE_YAML" | grep "web:" | sed 's/.*web: //')
+  PROCESS_SOURCE="(default)"
+fi
+
+# Translate PHP commands to FrankenPHP equivalents
+if [ "$LANG_NORMALIZED" = "php" ]; then
+  case "$WEB_PROCESS" in
+    # heroku-php-apache2 <docroot> -> frankenphp php-server
+    heroku-php-apache2*|heroku-php-nginx*)
+      DOCROOT=$(echo "$WEB_PROCESS" | sed -E 's/^heroku-php-(apache2|nginx)[[:space:]]*//')
+      DOCROOT="${DOCROOT%/}"
+      [ -z "$DOCROOT" ] && DOCROOT="."
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r $DOCROOT"
+      ;;
+    # php -S 0.0.0.0:$PORT -t <docroot> -> frankenphp php-server
+    "php -S"*"-t "*)
+      DOCROOT=$(echo "$WEB_PROCESS" | sed -E 's/.*-t[[:space:]]+([^[:space:]]+).*/\1/')
+      DOCROOT="${DOCROOT%/}"
+      [ -z "$DOCROOT" ] && DOCROOT="."
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r $DOCROOT"
+      ;;
+    # php -S 0.0.0.0:$PORT (no docroot) -> frankenphp php-server
+    "php -S"*)
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r ."
+      ;;
+    # php artisan serve -> frankenphp php-server -r public (Laravel)
+    *"artisan serve"*)
+      WEB_PROCESS="frankenphp php-server --listen :\$PORT -r public"
+      ;;
+  esac
+fi
+
+# Translate Rust Procfile commands
+# Rust binary is copied from target/release/ to /build/app
+if [ "$LANG_NORMALIZED" = "rust" ]; then
+  case "$WEB_PROCESS" in
+    # ./target/release/binary [args] -> ./app [args]
+    # target/release/binary [args] -> ./app [args]
+    # ENV=value ./target/release/binary [args] -> ENV=value ./app [args]
+    *"./target/release/"*|*"target/release/"*)
+      WEB_PROCESS=$(echo "$WEB_PROCESS" | sed 's|\./target/release/[^[:space:]]*|./app|' | sed 's|target/release/[^[:space:]]*|./app|')
+      ;;
+  esac
+fi
+
+# Translate Go/Rust commands to use relative path (binary is in /app)
+if [ "$LANG_NORMALIZED" = "go" ] || [ "$LANG_NORMALIZED" = "golang" ] || [ "$LANG_NORMALIZED" = "rust" ]; then
+  # If WEB_PROCESS is just a binary name (no path, no arguments with spaces at start)
+  # prefix with ./ to run from current directory
+  case "$WEB_PROCESS" in
+    ./*|/*|*" "*) ;;  # Already has path prefix or has arguments
+    *) WEB_PROCESS="./$WEB_PROCESS" ;;
+  esac
+fi
+
+# Update PROCFILE_PROCESSES_JSON with translated WEB_PROCESS for output JSON
+if [ -n "$WEB_PROCESS" ] && [ "$PROCFILE_PROCESSES_JSON" != "{}" ]; then
+  PROCFILE_PROCESSES_JSON=$(echo "$PROCFILE_PROCESSES_JSON" | jq -c --arg web "$WEB_PROCESS" '.web = $web')
+fi
+
+header "Detecting process types"
+# Show all processes
+if [ "$PROCFILE_PROCESSES_JSON" != "{}" ]; then
+  # Show web process (use translated WEB_PROCESS, not raw Procfile)
+  if [ -n "$WEB_PROCESS" ]; then
+    info "web: $WEB_PROCESS"
+  fi
+  # Show release process
+  release_proc=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r '.release // empty')
+  if [ -n "$release_proc" ]; then
+    info "release: $release_proc"
+  fi
+  # Show workers
+  workers_count=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r '.workers // [] | length')
+  if [ "$workers_count" -gt 0 ]; then
+    echo "$PROCFILE_PROCESSES_JSON" | jq -r '.workers[] | "\(.name): \(.command)"' | while read -r proc_line; do
+      info "$proc_line"
+    done
+  fi
+else
+  info "web: $WEB_PROCESS $PROCESS_SOURCE"
+fi
+
+# Show custom build command if set
+if [ -n "$BUILD_COMMAND" ]; then
+  info ""
+  info "Build command: $BUILD_COMMAND (custom)"
+fi
+
+# Map language to Docker images
+# USE_DHI=true: Docker Hardened Images (dhi.io) - minimal, secure, no shell
+# USE_DHI=false: Official Docker Hub images - full-featured
+BUILD_IMAGE=""
+RUNTIME_IMAGE=""
+
+if [ "$USE_DHI" = "true" ]; then
+  case "$LANG_NORMALIZED" in
+    node.js|nodejs|node)
+      BUILD_IMAGE="dhi.io/node:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/node:${VERSION}"
+      ;;
+    deno)
+      # DHI Deno images only available from 2.6.4+
+      # Parse version: major.minor.patch
+      DENO_MAJOR=$(echo "$VERSION" | cut -d'.' -f1)
+      DENO_MINOR=$(echo "$VERSION" | cut -d'.' -f2)
+      DENO_PATCH=$(echo "$VERSION" | cut -d'.' -f3)
+      DENO_PATCH=${DENO_PATCH:-0}  # Default to 0 if not specified
+
+      # Check if version is >= 2.6.4
+      DENO_VERSION_OK=false
+      if [ "$DENO_MAJOR" -gt 2 ]; then
+        DENO_VERSION_OK=true
+      elif [ "$DENO_MAJOR" -eq 2 ]; then
+        if [ "$DENO_MINOR" -gt 6 ]; then
+          DENO_VERSION_OK=true
+        elif [ "$DENO_MINOR" -eq 6 ] && [ "$DENO_PATCH" -ge 4 ]; then
+          DENO_VERSION_OK=true
+        fi
+      fi
+
+      if [ "$DENO_VERSION_OK" = "false" ]; then
+        warning "Deno ${VERSION} not available in DHI, using 2.6.4 instead"
+        VERSION="2.6.4"
+      fi
+
+      BUILD_IMAGE="dhi.io/deno:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/deno:${VERSION}"
+      ;;
+    bun)
+      # DHI Bun images only available from 1.3.6+
+      # Parse version: major.minor.patch
+      BUN_MAJOR=$(echo "$VERSION" | cut -d'.' -f1)
+      BUN_MINOR=$(echo "$VERSION" | cut -d'.' -f2)
+      BUN_PATCH=$(echo "$VERSION" | cut -d'.' -f3)
+      BUN_PATCH=${BUN_PATCH:-0}  # Default to 0 if not specified
+
+      # Check if version is >= 1.3.6
+      BUN_VERSION_OK=false
+      if [ "$BUN_MAJOR" -gt 1 ]; then
+        BUN_VERSION_OK=true
+      elif [ "$BUN_MAJOR" -eq 1 ]; then
+        if [ "$BUN_MINOR" -gt 3 ]; then
+          BUN_VERSION_OK=true
+        elif [ "$BUN_MINOR" -eq 3 ] && [ "$BUN_PATCH" -ge 6 ]; then
+          BUN_VERSION_OK=true
+        fi
+      fi
+
+      if [ "$BUN_VERSION_OK" = "false" ]; then
+        warning "Bun ${VERSION} not available in DHI, using 1.3.6 instead"
+        VERSION="1.3.6"
+      fi
+
+      BUILD_IMAGE="dhi.io/bun:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/bun:${VERSION}"
+      ;;
+    python)
+      BUILD_IMAGE="dhi.io/python:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/python:${VERSION}"
+      ;;
+    ruby)
+      BUILD_IMAGE="dhi.io/ruby:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/ruby:${VERSION}"
+      ;;
+    go|golang)
+      # DHI Go minimum versions per minor release
+      # See: https://docs.docker.com/dhi/migration/examples/go/
+      # 1.24.x: min 1.24.1, 1.23.x: min 1.23.7, 1.22.x: min 1.22.12
+      # Note: 1.22, 1.23, 1.24 (no patch) are floating tags → pass through
+      GO_MAJOR=$(echo "$VERSION" | cut -d'.' -f1)
+      GO_MINOR=$(echo "$VERSION" | cut -d'.' -f2)
+      GO_PATCH=$(echo "$VERSION" | cut -d'.' -f3)
+
+      if [ "$GO_MAJOR" -eq 1 ] && [ -n "$GO_PATCH" ]; then
+        # Only check when explicit patch version is specified
+        if [ "$GO_MINOR" -lt 22 ]; then
+          error "Go $VERSION is not supported by DHI images (minimum: 1.22.12)"
+          exit 1
+        elif [ "$GO_MINOR" -eq 22 ] && [ "$GO_PATCH" -lt 12 ]; then
+          warning "Go $VERSION not available in DHI, using 1.22.12 instead"
+          VERSION="1.22.12"
+        elif [ "$GO_MINOR" -eq 23 ] && [ "$GO_PATCH" -lt 7 ]; then
+          warning "Go $VERSION not available in DHI, using 1.23.7 instead"
+          VERSION="1.23.7"
+        elif [ "$GO_MINOR" -eq 24 ] && [ "$GO_PATCH" -lt 1 ]; then
+          warning "Go $VERSION not available in DHI, using 1.24.1 instead"
+          VERSION="1.24.1"
+        fi
+      elif [ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt 22 ]; then
+        # 1.21, 1.20, etc. without patch → error
+        error "Go $VERSION is not supported by DHI images (minimum: 1.22)"
+        exit 1
+      fi
+      # 1.22, 1.23, 1.24, 1.25+ (floating tags) pass through
+
+      BUILD_IMAGE="dhi.io/golang:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/golang:${VERSION}"
+      ;;
+    rust)
+      BUILD_IMAGE="dhi.io/rust:${VERSION}-dev"
+      RUNTIME_IMAGE="dhi.io/rust:${VERSION}"
+      ;;
+    php)
+      # DHI not available for PHP - FrankenPHP is a specialized server (Go + Caddy based)
+      # DHI php images are standard PHP, not FrankenPHP, so frankenphp command won't exist
+      warning "Docker Hardened Images not available for PHP (uses FrankenPHP)"
+      # Use FrankenPHP images instead
+      PHP_MAJOR_MINOR=$(echo "$VERSION" | sed 's/^\([0-9]*\.[0-9]*\).*/\1/')
+      case "$PHP_MAJOR_MINOR" in
+        8.2|8.3|8.4)
+          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            BUILD_IMAGE="dunglas/frankenphp:builder-php${VERSION}"
+            RUNTIME_IMAGE="dunglas/frankenphp:php${VERSION}"
+          else
+            BUILD_IMAGE="dunglas/frankenphp:builder-php${PHP_MAJOR_MINOR}"
+            RUNTIME_IMAGE="dunglas/frankenphp:php${PHP_MAJOR_MINOR}"
+          fi
+          ;;
+        *)
+          warning "PHP ${PHP_MAJOR_MINOR} not supported by FrankenPHP, using PHP 8.2"
+          BUILD_IMAGE="dunglas/frankenphp:builder-php8.2"
+          RUNTIME_IMAGE="dunglas/frankenphp:php8.2"
+          ;;
+      esac
+      ;;
+    java)
+      # Normalize Java version (1.8 -> 8, 1.11 -> 11, etc.)
+      JAVA_MAJOR=$(echo "$VERSION" | sed 's/^1\.//')
+      BUILD_IMAGE="dhi.io/eclipse-temurin:${JAVA_MAJOR}-jdk-dev"
+      RUNTIME_IMAGE="dhi.io/eclipse-temurin:${JAVA_MAJOR}"
+      ;;
+    scala)
+      # DHI runtime available for Scala (build uses official sbtscala which includes sbt)
+      success "Build uses official sbtscala image (includes sbt), runtime uses Docker Hardened Image"
+      # Detect Java major version from system.properties
+      SCALA_JAVA_MAJOR="21"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/system.properties" ]; then
+        DETECTED_JAVA=$(grep -E "^java.runtime.version" "$EFFECTIVE_SOURCE_DIR/system.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_JAVA" ]; then
+          SCALA_JAVA_MAJOR=$(echo "$DETECTED_JAVA" | cut -d'.' -f1)
+        fi
+      fi
+      case "$SCALA_JAVA_MAJOR" in
+        8)  SCALA_JDK_TAG="8u442-b06" ;;
+        11) SCALA_JDK_TAG="11.0.26_4" ;;
+        17) SCALA_JDK_TAG="17.0.15_6" ;;
+        21) SCALA_JDK_TAG="21.0.6_7" ;;
+        *)  SCALA_JDK_TAG="21.0.6_7"; SCALA_JAVA_MAJOR="21" ;;
+      esac
+      # Detect sbt version from project/build.properties
+      SCALA_SBT_VERSION="1.12.0"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/project/build.properties" ]; then
+        DETECTED_SBT=$(grep -E "^sbt.version" "$EFFECTIVE_SOURCE_DIR/project/build.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_SBT" ]; then
+          SCALA_SBT_VERSION="$DETECTED_SBT"
+        fi
+      fi
+      # Build: sbtscala official image (needs sbt tools)
+      # Runtime: DHI eclipse-temurin distroless JRE
+      BUILD_IMAGE="sbtscala/scala-sbt:eclipse-temurin-${SCALA_JDK_TAG}_${SCALA_SBT_VERSION}_${VERSION}"
+      RUNTIME_IMAGE="dhi.io/eclipse-temurin:${SCALA_JAVA_MAJOR}"
+      ;;
+    kotlin)
+      # Detect Java major version from system.properties
+      KOTLIN_JAVA_MAJOR="21"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/system.properties" ]; then
+        DETECTED_JAVA=$(grep -E "^java.runtime.version" "$EFFECTIVE_SOURCE_DIR/system.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_JAVA" ]; then
+          # Normalize (1.8 -> 8, 1.11 -> 11)
+          KOTLIN_JAVA_MAJOR=$(echo "$DETECTED_JAVA" | sed 's/^1\.//' | cut -d'.' -f1)
+        fi
+      fi
+      BUILD_IMAGE="dhi.io/eclipse-temurin:${KOTLIN_JAVA_MAJOR}-jdk-dev"
+      RUNTIME_IMAGE="dhi.io/eclipse-temurin:${KOTLIN_JAVA_MAJOR}"
+      ;;
+    .net|dotnet|csharp)
+      BUILD_IMAGE="dhi.io/dotnet:${VERSION}-sdk"
+      RUNTIME_IMAGE="dhi.io/aspnetcore:${VERSION}"
+      ;;
+    clojure)
+      # DHI runtime available for Clojure (build uses official clojure image with lein)
+      success "Build uses official clojure image (includes lein), runtime uses Docker Hardened Image"
+      # Detect Java major version from system.properties
+      CLOJURE_JAVA_MAJOR="21"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/system.properties" ]; then
+        DETECTED_JAVA=$(grep -E "^java.runtime.version" "$EFFECTIVE_SOURCE_DIR/system.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_JAVA" ]; then
+          CLOJURE_JAVA_MAJOR=$(echo "$DETECTED_JAVA" | cut -d'.' -f1)
+        fi
+      fi
+      # Build: clojure official image (includes lein)
+      # Runtime: DHI eclipse-temurin distroless JRE
+      BUILD_IMAGE="clojure:temurin-${CLOJURE_JAVA_MAJOR}-lein"
+      RUNTIME_IMAGE="dhi.io/eclipse-temurin:${CLOJURE_JAVA_MAJOR}"
+      ;;
+    elixir)
+      # DHI not available for Elixir, falling back to official images
+      warning "DHI images not available for Elixir, using official images"
+      BUILD_IMAGE="elixir:${VERSION}"
+      RUNTIME_IMAGE="elixir:${VERSION}-slim"
+      ;;
+    *)
+      BUILD_IMAGE="ubuntu:22.04"
+      RUNTIME_IMAGE="ubuntu:22.04"
+      ;;
+  esac
+else
+  # Official Docker Hub images
+  case "$LANG_NORMALIZED" in
+    node.js|nodejs|node)
+      BUILD_IMAGE="node:${VERSION}"
+      RUNTIME_IMAGE="node:${VERSION}-slim"
+      ;;
+    deno)
+      BUILD_IMAGE="denoland/deno:${VERSION}"
+      RUNTIME_IMAGE="denoland/deno:${VERSION}"
+      ;;
+    bun)
+      BUILD_IMAGE="oven/bun:${VERSION}"
+      RUNTIME_IMAGE="oven/bun:${VERSION}-slim"
+      ;;
+    python)
+      BUILD_IMAGE="python:${VERSION}"
+      RUNTIME_IMAGE="python:${VERSION}-slim"
+      ;;
+    ruby)
+      BUILD_IMAGE="ruby:${VERSION}"
+      RUNTIME_IMAGE="ruby:${VERSION}-slim"
+      ;;
+    go|golang)
+      BUILD_IMAGE="golang:${VERSION}"
+      RUNTIME_IMAGE="debian:bookworm-slim"
+      ;;
+    rust)
+      BUILD_IMAGE="rust:${VERSION}"
+      RUNTIME_IMAGE="debian:bookworm-slim"
+      ;;
+    php)
+      # FrankenPHP: modern PHP app server (Go + Caddy based)
+      # builder-php8.X has build tools (git, unzip, composer)
+      # php8.X is the slim runtime
+      PHP_MAJOR_MINOR=$(echo "$VERSION" | sed 's/^\([0-9]*\.[0-9]*\).*/\1/')
+      case "$PHP_MAJOR_MINOR" in
+        8.2|8.3|8.4)
+          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            BUILD_IMAGE="dunglas/frankenphp:builder-php${VERSION}"
+            RUNTIME_IMAGE="dunglas/frankenphp:php${VERSION}"
+          else
+            BUILD_IMAGE="dunglas/frankenphp:builder-php${PHP_MAJOR_MINOR}"
+            RUNTIME_IMAGE="dunglas/frankenphp:php${PHP_MAJOR_MINOR}"
+          fi
+          ;;
+        *)
+          # FrankenPHP minimum is 8.2, fallback for 8.1 and older
+          warning "PHP ${PHP_MAJOR_MINOR} not supported by FrankenPHP, using PHP 8.2"
+          BUILD_IMAGE="dunglas/frankenphp:builder-php8.2"
+          RUNTIME_IMAGE="dunglas/frankenphp:php8.2"
+          ;;
+      esac
+      ;;
+    java)
+      # Normalize Java version (1.8 -> 8, 1.11 -> 11, etc.)
+      JAVA_MAJOR=$(echo "$VERSION" | sed 's/^1\.//')
+      # Detect Maven vs Gradle
+      if [ -f "$EFFECTIVE_SOURCE_DIR/build.gradle" ] || [ -f "$EFFECTIVE_SOURCE_DIR/build.gradle.kts" ]; then
+        BUILD_IMAGE="gradle:jdk${JAVA_MAJOR}"
+      else
+        BUILD_IMAGE="maven:3-eclipse-temurin-${JAVA_MAJOR}"
+      fi
+      RUNTIME_IMAGE="eclipse-temurin:${JAVA_MAJOR}-jre"
+      ;;
+    scala)
+      # Detect Java major version from system.properties
+      SCALA_JAVA_MAJOR="21"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/system.properties" ]; then
+        DETECTED_JAVA=$(grep -E "^java.runtime.version" "$EFFECTIVE_SOURCE_DIR/system.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_JAVA" ]; then
+          # Extract major version (e.g., "17" from "17" or "17.0.1")
+          SCALA_JAVA_MAJOR=$(echo "$DETECTED_JAVA" | cut -d'.' -f1)
+        fi
+      fi
+      # Map Java major version to sbtscala image tag (uses specific JDK versions)
+      # sbtscala images use format: eclipse-temurin-{full_jdk_version}_{sbt}_{scala}
+      case "$SCALA_JAVA_MAJOR" in
+        8)  SCALA_JDK_TAG="8u442-b06" ;;
+        11) SCALA_JDK_TAG="11.0.26_4" ;;
+        17) SCALA_JDK_TAG="17.0.15_6" ;;
+        21) SCALA_JDK_TAG="21.0.6_7" ;;
+        *)  SCALA_JDK_TAG="21.0.6_7"; SCALA_JAVA_MAJOR="21" ;;
+      esac
+      # Detect sbt version from project/build.properties
+      SCALA_SBT_VERSION="1.12.0"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/project/build.properties" ]; then
+        DETECTED_SBT=$(grep -E "^sbt.version" "$EFFECTIVE_SOURCE_DIR/project/build.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_SBT" ]; then
+          SCALA_SBT_VERSION="$DETECTED_SBT"
+        fi
+      fi
+      # Use sbtscala image - sbt will auto-download correct version from build.properties
+      # Format: sbtscala/scala-sbt:eclipse-temurin-{jdk}_{sbt}_{scala}
+      BUILD_IMAGE="sbtscala/scala-sbt:eclipse-temurin-${SCALA_JDK_TAG}_${SCALA_SBT_VERSION}_${VERSION}"
+      RUNTIME_IMAGE="eclipse-temurin:${SCALA_JAVA_MAJOR}-jre"
+      ;;
+    clojure)
+      # Detect Java major version from system.properties
+      CLOJURE_JAVA_MAJOR="21"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/system.properties" ]; then
+        DETECTED_JAVA=$(grep -E "^java.runtime.version" "$EFFECTIVE_SOURCE_DIR/system.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_JAVA" ]; then
+          CLOJURE_JAVA_MAJOR=$(echo "$DETECTED_JAVA" | cut -d'.' -f1)
+        fi
+      fi
+      # Use clojure official image for build (includes lein)
+      BUILD_IMAGE="clojure:temurin-${CLOJURE_JAVA_MAJOR}-lein"
+      RUNTIME_IMAGE="eclipse-temurin:${CLOJURE_JAVA_MAJOR}-jre"
+      ;;
+    kotlin)
+      # Detect Java major version from system.properties
+      KOTLIN_JAVA_MAJOR="21"
+      if [ -f "$EFFECTIVE_SOURCE_DIR/system.properties" ]; then
+        DETECTED_JAVA=$(grep -E "^java.runtime.version" "$EFFECTIVE_SOURCE_DIR/system.properties" | cut -d'=' -f2 | tr -d '[:space:]')
+        if [ -n "$DETECTED_JAVA" ]; then
+          # Normalize (1.8 -> 8, 1.11 -> 11)
+          KOTLIN_JAVA_MAJOR=$(echo "$DETECTED_JAVA" | sed 's/^1\.//' | cut -d'.' -f1)
+        fi
+      fi
+      BUILD_IMAGE="gradle:jdk${KOTLIN_JAVA_MAJOR}"
+      RUNTIME_IMAGE="eclipse-temurin:${KOTLIN_JAVA_MAJOR}-jre"
+      ;;
+    .net|dotnet|csharp)
+      BUILD_IMAGE="mcr.microsoft.com/dotnet/sdk:${VERSION}"
+      RUNTIME_IMAGE="mcr.microsoft.com/dotnet/aspnet:${VERSION}"
+      ;;
+    elixir)
+      BUILD_IMAGE="elixir:${VERSION}"
+      RUNTIME_IMAGE="elixir:${VERSION}-slim"
+      ;;
+    *)
+      BUILD_IMAGE="ubuntu:22.04"
+      RUNTIME_IMAGE="ubuntu:22.04"
+      ;;
+  esac
+fi
+
+# Rewrite Docker Hub images to use registry mirror if configured
+# This speeds up builds by using cached images from Harbor proxy
+if [ -n "$REGISTRY_MIRROR" ]; then
+  MIRROR_HOST="${REGISTRY_MIRROR#https://}"
+  MIRROR_HOST="${MIRROR_HOST#http://}"
+
+  rewrite_image() {
+    local img="$1"
+    # dhi.io images use DHI_MIRROR if configured
+    if [[ "$img" =~ ^dhi\.io/ ]] && [ -n "$DHI_MIRROR" ]; then
+      local dhi_host="${DHI_MIRROR#https://}"
+      dhi_host="${dhi_host#http://}"
+      echo "${dhi_host}/${img#dhi.io/}"
+      return
+    fi
+    # Skip if already has a registry (contains . before first /)
+    if [[ "$img" =~ ^[^/]+\.[^/]+/ ]]; then
+      echo "$img"
+      return
+    fi
+    # Official Docker Hub images (no /) get mirror/library/ prefix
+    if [[ "$img" != */* ]]; then
+      echo "${MIRROR_HOST}/mirror/library/${img}"
+    else
+      # Third-party images (user/repo) get mirror/ prefix
+      echo "${MIRROR_HOST}/mirror/${img}"
+    fi
+  }
+
+  BUILD_IMAGE=$(rewrite_image "$BUILD_IMAGE")
+  RUNTIME_IMAGE=$(rewrite_image "$RUNTIME_IMAGE")
+  if [ -n "$SECONDARY_IMAGE" ]; then
+    SECONDARY_IMAGE=$(rewrite_image "$SECONDARY_IMAGE")
+  fi
+fi
+
+info ""
+info "Build image:   $BUILD_IMAGE"
+info "Runtime image: $RUNTIME_IMAGE"
+
+header "Compiling"
+
+RUNTIME_DOCKERFILE="$BUILD_DIR/Dockerfile.runtime"
+
+# Write Dockerfile header with BuildKit syntax for cache mounts
+cat > "$RUNTIME_DOCKERFILE" <<'DOCKERFILE_HEADER'
+# syntax=docker/dockerfile:1
+# check=skip=SecretsUsedInArgOrEnv
+# Multi-stage build using official images
+DOCKERFILE_HEADER
+
+# Add FROM line for primary builder
+echo "FROM ${BUILD_IMAGE} AS builder" >> "$RUNTIME_DOCKERFILE"
+echo "" >> "$RUNTIME_DOCKERFILE"
+echo "WORKDIR /build" >> "$RUNTIME_DOCKERFILE"
+
+# Inject custom environment variables (any env var not in KNOWN_BUILDER_VARS)
+inject_custom_env_vars "$RUNTIME_DOCKERFILE"
+
+# Copy additional runtimes into primary builder (shared environment)
+# All runtimes are available in the same build environment
+if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ]; then
+  echo "" >> "$RUNTIME_DOCKERFILE"
+  echo "# Add additional runtimes (multi-buildpack)" >> "$RUNTIME_DOCKERFILE"
+
+  for i in "${!ADDITIONAL_LANGS[@]}"; do
+    bp_lang="${ADDITIONAL_LANGS[$i]}"
+    bp_version="${ADDITIONAL_VERSIONS[$i]}"
+
+    # Get source image for this runtime
+    bp_image=$(buildpack_get_source_image "$bp_lang" "$bp_version" "$USE_DHI")
+
+    # Rewrite image if using registry mirror
+    if [ -n "$REGISTRY_MIRROR" ]; then
+      bp_image=$(rewrite_image "$bp_image")
+    fi
+
+    info "Adding runtime: ${bp_lang} ${bp_version}"
+
+    # Copy runtime binaries and libraries from the language image
+    buildpack_copy_runtime "$RUNTIME_DOCKERFILE" "$bp_lang" "$bp_image"
+  done
+
+  echo "" >> "$RUNTIME_DOCKERFILE"
+fi
+
+# Ruby, Node.js, Python, .NET, Java, Kotlin, Scala, Clojure, Go, PHP, Rust, Elixir, Deno, and Bun use optimized layer caching (copy lockfiles first, install, then copy rest)
+# All other languages copy everything first
+if [ "$LANG_NORMALIZED" != "ruby" ] && [ "$LANG_NORMALIZED" != "node.js" ] && [ "$LANG_NORMALIZED" != "nodejs" ] && [ "$LANG_NORMALIZED" != "node" ] && [ "$LANG_NORMALIZED" != "python" ] && [ "$LANG_NORMALIZED" != ".net" ] && [ "$LANG_NORMALIZED" != "dotnet" ] && [ "$LANG_NORMALIZED" != "csharp" ] && [ "$LANG_NORMALIZED" != "java" ] && [ "$LANG_NORMALIZED" != "kotlin" ] && [ "$LANG_NORMALIZED" != "scala" ] && [ "$LANG_NORMALIZED" != "clojure" ] && [ "$LANG_NORMALIZED" != "go" ] && [ "$LANG_NORMALIZED" != "golang" ] && [ "$LANG_NORMALIZED" != "php" ] && [ "$LANG_NORMALIZED" != "rust" ] && [ "$LANG_NORMALIZED" != "elixir" ] && [ "$LANG_NORMALIZED" != "deno" ] && [ "$LANG_NORMALIZED" != "bun" ]; then
+  echo "COPY . ." >> "$RUNTIME_DOCKERFILE"
+fi
+
+# No imports needed - runtimes already copied above
+
+echo "" >> "$RUNTIME_DOCKERFILE"
+
+# Add language-specific build commands based on language
+case "$LANG_NORMALIZED" in
+  node.js|nodejs|node)
+    nodejs_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND" "$S3_CACHE_BUCKET" "$CACHE_KEY"
+    ;;
+  deno)
+    deno_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  bun)
+    bun_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  python)
+    python_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  ruby)
+    # Pass USE_DHI to install dev packages for native gem compilation in DHI builds
+    ruby_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND" "$BUNDLE_WITHOUT" "$SECONDARY_LANG" "$([ "$USE_DHI" = "true" ] && echo true || echo false)"
+    ;;
+  go|golang)
+    go_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  rust)
+    rust_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  php)
+    php_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  java)
+    # Pass USE_DHI to install Maven/Gradle in builder (eclipse-temurin JDK doesn't include build tools)
+    java_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND" "$([ "$USE_DHI" = "true" ] && echo true || echo false)"
+    ;;
+  scala)
+    scala_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  clojure)
+    clojure_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  kotlin)
+    # Pass USE_DHI to copy jar to known location (distroless can't expand globs)
+    kotlin_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND" "$([ "$USE_DHI" = "true" ] && echo true || echo false)"
+    ;;
+  .net|dotnet|csharp)
+    dotnet_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
+    ;;
+  elixir)
+    # Detect if using releases (for runtime stage decision)
+    ELIXIR_USES_RELEASES=$(elixir_uses_releases "$EFFECTIVE_SOURCE_DIR" && echo "true" || echo "false")
+    elixir_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND" "$MIX_ENV"
+    ;;
+esac
+
+# Run builds for additional buildpacks (runtimes already copied above)
+# These run AFTER primary language build, with all runtimes available
+if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ]; then
+  echo "" >> "$RUNTIME_DOCKERFILE"
+  echo "# Build additional buildpacks (all runtimes available)" >> "$RUNTIME_DOCKERFILE"
+
+  for bp_lang in "${ADDITIONAL_LANGS[@]}"; do
+    # Skip if this is the same as primary (shouldn't happen but safety check)
+    if [ "$bp_lang" = "$LANG_NORMALIZED" ]; then
+      continue
+    fi
+
+    info "Building: ${bp_lang}"
+    buildpack_generate_build "$RUNTIME_DOCKERFILE" "$bp_lang" "$EFFECTIVE_SOURCE_DIR"
+  done
+fi
+
+# Add runtime stage - DHI images already have a non-root user
+# Check USE_DHI env var (URL may have been rewritten by REGISTRY_MIRROR/DHI_MIRROR)
+IS_DHI_IMAGE=false
+DHI_USER="nonroot"
+if [ "$USE_DHI" = "true" ]; then
+  # PHP doesn't use DHI (FrankenPHP is a specialized server, not standard PHP)
+  # Elixir doesn't have DHI images available
+  if [ "$LANG_NORMALIZED" != "php" ] && [ "$LANG_NORMALIZED" != "elixir" ]; then
+    IS_DHI_IMAGE=true
+  fi
+  # DHI images have different default users per language
+  # Note: docker inspect won't work here since image isn't pulled yet
+  case "$LANG_NORMALIZED" in
+    node.js|nodejs|node)
+      DHI_USER="node"
+      ;;
+    deno)
+      DHI_USER="deno"
+      ;;
+    *)
+      DHI_USER="nonroot"
+      ;;
+  esac
+fi
+
+if [ "$IS_DHI_IMAGE" = true ]; then
+  # DHI runtime base - language-specific handlers or generic fallback
+  if [ "$LANG_NORMALIZED" = "ruby" ]; then
+    ruby_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "$EFFECTIVE_SOURCE_DIR" "$IS_DHI_IMAGE" "$DHI_USER"
+  else
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+# Runtime stage (Docker Hardened Image - uses ${DHI_USER} user)
+FROM ${RUNTIME_IMAGE}
+
+WORKDIR /app
+COPY --from=builder --chown=${DHI_USER}:${DHI_USER} /build /app
+DOCKERFILE_FOOTER
+  fi
+else
+  # Ruby and Python use optimized layer ordering: apt-get first (cacheable), then COPY (changes every build)
+  if [ "$LANG_NORMALIZED" = "ruby" ]; then
+    ruby_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "$EFFECTIVE_SOURCE_DIR" "$IS_DHI_IMAGE" "$DHI_USER"
+  elif [ "$LANG_NORMALIZED" = "python" ]; then
+    python_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "$EFFECTIVE_SOURCE_DIR"
+  elif [ "$LANG_NORMALIZED" = ".net" ] || [ "$LANG_NORMALIZED" = "dotnet" ] || [ "$LANG_NORMALIZED" = "csharp" ]; then
+    dotnet_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE"
+  else
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+# Runtime stage
+FROM ${RUNTIME_IMAGE}
+
+# Create non-root user with home directory
+RUN getent group 1000 >/dev/null 2>&1 || groupadd -g 1000 miget; \\
+    getent passwd 1000 >/dev/null 2>&1 || useradd -u 1000 -g 1000 -m miget; \\
+    mkdir -p /home/miget && chown 1000:1000 /home/miget
+
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+DOCKERFILE_FOOTER
+  fi
+fi
+
+# Copy additional runtimes to final image (non-DHI only)
+# DHI distroless images can't have additional runtimes
+if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ] && [ "$IS_DHI_IMAGE" != true ]; then
+  echo "" >> "$RUNTIME_DOCKERFILE"
+  echo "# Additional runtimes from multi-buildpack" >> "$RUNTIME_DOCKERFILE"
+  buildpack_generate_runtime_copies "$RUNTIME_DOCKERFILE" "$IS_DHI_IMAGE" "${ADDITIONAL_LANGS[@]}"
+fi
+
+# Add language-specific runtime setup
+case "$LANG_NORMALIZED" in
+  node.js|nodejs|node)
+    nodejs_generate_runtime "$RUNTIME_DOCKERFILE"
+    ;;
+  python)
+    python_generate_runtime "$RUNTIME_DOCKERFILE" "$IS_DHI_IMAGE" "$DHI_USER" "$EFFECTIVE_SOURCE_DIR"
+    ;;
+  ruby)
+    BUNDLER_VERSION=$(ruby_get_bundler_version "$EFFECTIVE_SOURCE_DIR")
+    ruby_generate_runtime "$RUNTIME_DOCKERFILE" "$IS_DHI_IMAGE" "$DHI_USER" "$BUNDLE_WITHOUT" "$SECRET_KEY_BASE" "$BUNDLER_VERSION"
+    ;;
+  php)
+    php_generate_runtime "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR"
+    ;;
+  deno)
+    deno_generate_runtime "$RUNTIME_DOCKERFILE"
+    ;;
+  bun)
+    bun_generate_runtime "$RUNTIME_DOCKERFILE"
+    ;;
+  rust)
+    rust_generate_runtime "$RUNTIME_DOCKERFILE" "$IS_DHI_IMAGE" "$DHI_USER"
+    ;;
+  elixir)
+    elixir_generate_runtime "$RUNTIME_DOCKERFILE" "$MIX_ENV" "$ELIXIR_USES_RELEASES"
+    ;;
+  .net|dotnet|csharp)
+    dotnet_generate_runtime "$RUNTIME_DOCKERFILE" "$IS_DHI_IMAGE" "$DHI_USER"
+    ;;
+  java)
+    java_generate_runtime "$RUNTIME_DOCKERFILE" "$IS_DHI_IMAGE" "$DHI_USER"
+    ;;
+  go|golang)
+    # Add Go toolchain to runtime image if requested
+    if [ "$GO_INSTALL_TOOLS_IN_IMAGE" = "true" ]; then
+      cat >> "$RUNTIME_DOCKERFILE" <<EOF
+
+# Copy Go toolchain from builder (GO_INSTALL_TOOLS_IN_IMAGE=true)
+COPY --from=builder /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:\$PATH"
+ENV GOROOT=/usr/local/go
+EOF
+      info "Including Go toolchain in runtime image"
+    fi
+
+    # Set up GOPATH in runtime image if requested
+    if [ "$GO_SETUP_GOPATH_IN_IMAGE" = "true" ]; then
+      cat >> "$RUNTIME_DOCKERFILE" <<'EOF'
+
+# Set up GOPATH (GO_SETUP_GOPATH_IN_IMAGE=true)
+ENV GOPATH=/app/go
+ENV PATH="$GOPATH/bin:$PATH"
+RUN mkdir -p /app/go/bin /app/go/src /app/go/pkg
+EOF
+      info "Setting up GOPATH in runtime image"
+    fi
+    ;;
+esac
+
+# Add final runtime configuration
+if [ "$IS_DHI_IMAGE" = true ]; then
+  # DHI images don't have package managers, so convert npm/bun/pip commands to direct execution
+  DHI_WEB_PROCESS="$WEB_PROCESS"
+
+  # For Node.js: convert "npm start" to actual script from package.json
+  if [ "$DHI_WEB_PROCESS" = "npm start" ] && [ -f "$EFFECTIVE_SOURCE_DIR/package.json" ]; then
+    START_SCRIPT=$(jq -r '.scripts.start // empty' "$EFFECTIVE_SOURCE_DIR/package.json")
+    if [ -n "$START_SCRIPT" ]; then
+      DHI_WEB_PROCESS="$START_SCRIPT"
+    else
+      DHI_WEB_PROCESS="node index.js"
+    fi
+  fi
+
+  # For Bun: convert "bun run <script>" to actual command
+  if [[ "$DHI_WEB_PROCESS" == "bun run "* ]] && [ -f "$EFFECTIVE_SOURCE_DIR/package.json" ]; then
+    SCRIPT_NAME="${DHI_WEB_PROCESS#bun run }"
+    SCRIPT_CMD=$(jq -r ".scripts.\"$SCRIPT_NAME\" // empty" "$EFFECTIVE_SOURCE_DIR/package.json")
+    if [ -n "$SCRIPT_CMD" ]; then
+      DHI_WEB_PROCESS="bun $SCRIPT_CMD"
+    fi
+  fi
+
+  # For Python: convert pip/python -m to direct execution
+  if [[ "$DHI_WEB_PROCESS" == "pip "* ]]; then
+    DHI_WEB_PROCESS="python main.py"
+  fi
+
+  # For Java/Kotlin DHI: use known jar location (builder copies jar to app.jar)
+  # The glob pattern "target/*.jar" doesn't work in distroless (no shell)
+  if [[ "$LANG_NORMALIZED" == "java" || "$LANG_NORMALIZED" == "kotlin" ]]; then
+    if [[ "$DHI_WEB_PROCESS" == *"*.jar"* ]]; then
+      DHI_WEB_PROCESS="java -jar app.jar"
+      info "Java DHI: Using app.jar (copied from build output)"
+    fi
+  fi
+
+  # For Ruby: convert commands for DHI (no shell, no /usr/bin/env)
+  # - "bundle exec" is KEPT (needed for bundler deployment mode load paths)
+  # - "./bin/<script>" -> "ruby bin/<script>" (shebang won't work)
+  # - "bin/<script>" -> "ruby bin/<script>" (shebang won't work)
+  if [[ "$LANG_NORMALIZED" == "ruby" ]]; then
+    # Transform shebang scripts to ruby command (keep bundle exec prefix if present)
+    if [[ "$DHI_WEB_PROCESS" == "bundle exec ./bin/"* ]]; then
+      DHI_WEB_PROCESS="bundle exec ruby ${DHI_WEB_PROCESS#bundle exec ./}"
+    elif [[ "$DHI_WEB_PROCESS" == "bundle exec bin/"* ]]; then
+      DHI_WEB_PROCESS="bundle exec ruby ${DHI_WEB_PROCESS#bundle exec }"
+    elif [[ "$DHI_WEB_PROCESS" == "./bin/"* ]]; then
+      DHI_WEB_PROCESS="ruby ${DHI_WEB_PROCESS#./}"
+    elif [[ "$DHI_WEB_PROCESS" == "bin/"* ]]; then
+      DHI_WEB_PROCESS="ruby $DHI_WEB_PROCESS"
+    fi
+  fi
+
+  # For PHP: use full path since php is not in PATH in DHI runtime images
+  if [[ "$DHI_WEB_PROCESS" == "php "* ]]; then
+    # Get PHP version and construct full path
+    PHP_VERSION_MAJOR=$(echo "$VERSION" | cut -d'.' -f1,2)
+    DHI_WEB_PROCESS="/opt/php-${PHP_VERSION_MAJOR}/bin/${DHI_WEB_PROCESS}"
+  fi
+
+  # For Deno DHI: strip "deno " prefix since the image has deno as entrypoint
+  # Note: We're inside IS_DHI_IMAGE block, so no need to check BUILD_IMAGE (may have been rewritten by DHI_MIRROR)
+  if [[ "$LANG_NORMALIZED" == "deno" ]] && [[ "$DHI_WEB_PROCESS" == "deno "* ]]; then
+    DHI_WEB_PROCESS="${DHI_WEB_PROCESS#deno }"
+  fi
+
+  # For Scala DHI: convert sbt-native-packager script to direct java call
+  # The script at target/universal/stage/bin/<app> is a bash script (won't work in distroless)
+  # We need to call java directly with the classpath and main class
+  if [[ "$LANG_NORMALIZED" == "scala" ]] && [[ "$DHI_WEB_PROCESS" == "target/universal/stage/bin/"* ]]; then
+    # Detect if Play Framework app
+    IS_PLAY_APP=false
+    if [ -f "$EFFECTIVE_SOURCE_DIR/build.sbt" ] && grep -q "PlayScala\|PlayJava\|play.sbt.Play" "$EFFECTIVE_SOURCE_DIR/build.sbt"; then
+      IS_PLAY_APP=true
+    fi
+
+    # Extract any JVM args from the original command (e.g., -Dhttp.port=${PORT})
+    # Pre-expand ${PORT} to literal 5000 (shell vars don't work in distroless)
+    SCALA_JVM_ARGS=""
+    if [[ "$DHI_WEB_PROCESS" == *" -D"* ]]; then
+      SCALA_JVM_ARGS=$(echo "$DHI_WEB_PROCESS" | grep -oE '\-D[^ ]+' | sed 's/\${PORT}/5000/g' | tr '\n' ' ' | xargs)
+    fi
+
+    if [ "$IS_PLAY_APP" = true ]; then
+      # Play Framework main class
+      # conf/ directory contains application.conf (not inside JAR for Play apps)
+      if [ -n "$SCALA_JVM_ARGS" ]; then
+        DHI_WEB_PROCESS="java $SCALA_JVM_ARGS -cp target/universal/stage/lib/*:target/universal/stage/conf play.core.server.ProdServerStart"
+      else
+        DHI_WEB_PROCESS="java -cp target/universal/stage/lib/*:target/universal/stage/conf play.core.server.ProdServerStart"
+      fi
+      info "Scala DHI: Using direct java call for Play Framework"
+    else
+      # For non-Play apps, detect main class from build.sbt
+      # Patterns: mainClass := Some("..."), Compile / mainClass := Some("..."), mainClass in Compile := Some("...")
+      SCALA_MAIN_CLASS=""
+      if [ -f "$EFFECTIVE_SOURCE_DIR/build.sbt" ]; then
+        SCALA_MAIN_CLASS=$(grep -E 'mainClass.*:=.*Some\(' "$EFFECTIVE_SOURCE_DIR/build.sbt" | \
+          sed -E 's/.*Some\("([^"]+)"\).*/\1/' | head -1)
+      fi
+      if [ -n "$SCALA_MAIN_CLASS" ]; then
+        # Use -cp with wildcard (Java expands this, not shell) and explicit main class
+        if [ -n "$SCALA_JVM_ARGS" ]; then
+          DHI_WEB_PROCESS="java $SCALA_JVM_ARGS -cp target/universal/stage/lib/* $SCALA_MAIN_CLASS"
+        else
+          DHI_WEB_PROCESS="java -cp target/universal/stage/lib/* $SCALA_MAIN_CLASS"
+        fi
+        info "Scala DHI: Detected main class $SCALA_MAIN_CLASS"
+      else
+        warning "Scala DHI: No main class found in build.sbt, using default launcher"
+        if [ -n "$SCALA_JVM_ARGS" ]; then
+          DHI_WEB_PROCESS="java $SCALA_JVM_ARGS -cp target/universal/stage/lib/* Main"
+        else
+          DHI_WEB_PROCESS="java -cp target/universal/stage/lib/* Main"
+        fi
+      fi
+    fi
+  fi
+
+  # For .NET DHI: handle "cd <dir>; <command>" pattern and strip shell-dependent args
+  # e.g., "cd Frontend/bin/publish/; ./Frontend --urls http://*:$PORT"
+  # Note: dotnet CLI IS available in DHI aspnetcore images, so "dotnet app.dll" works
+  DHI_EXTRA_WORKDIR=""
+  if [[ "$LANG_NORMALIZED" == ".net" || "$LANG_NORMALIZED" == "dotnet" || "$LANG_NORMALIZED" == "csharp" ]]; then
+    # Handle "cd <dir>; <command>" pattern (shell not available)
+    if [[ "$DHI_WEB_PROCESS" == "cd "* ]]; then
+      # Extract directory from "cd <dir>;" or "cd <dir> &&"
+      DHI_CD_DIR=$(echo "$DHI_WEB_PROCESS" | sed -E 's/^cd ([^;&]+)[;&].*/\1/' | sed 's|/$||' | xargs)
+      # Extract command after the cd (after ; or &&)
+      DHI_WEB_PROCESS=$(echo "$DHI_WEB_PROCESS" | sed -E 's/^cd [^;&]+[;&]+[[:space:]]*//')
+      DHI_EXTRA_WORKDIR="/app/$DHI_CD_DIR"
+    fi
+
+    # Strip --urls argument ($PORT not expanded without shell, use ASPNETCORE_HTTP_PORTS env var)
+    # Matches: --urls http://*:$PORT, --urls=http://..., --urls "http://..."
+    DHI_WEB_PROCESS=$(echo "$DHI_WEB_PROCESS" | sed -E 's/--urls[= ][^ ]+//g' | xargs)
+  fi
+
+  # Convert WEB_PROCESS to JSON array format for CMD (single line)
+  # e.g., "./app" -> ["./app"] or "node server.js" -> ["node", "server.js"]
+  CMD_JSON=$(echo "$DHI_WEB_PROCESS" | jq -cR 'split(" ")')
+
+  # For compiled languages (Go, Rust, .NET) and PHP, we need ENTRYPOINT since DHI images have their own entrypoint
+  USE_ENTRYPOINT=false
+  case "$LANG_NORMALIZED" in
+    go|golang|rust|php|.net|dotnet|csharp)
+      USE_ENTRYPOINT=true
+      ;;
+  esac
+
+  # Add extra WORKDIR if needed (e.g., .NET with "cd <dir>; <command>")
+  if [ -n "$DHI_EXTRA_WORKDIR" ]; then
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+WORKDIR ${DHI_EXTRA_WORKDIR}
+DOCKERFILE_FOOTER
+  fi
+
+  if [ "$USE_ENTRYPOINT" = true ]; then
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+USER ${DHI_USER}
+
+EXPOSE 5000
+ENV PORT=5000
+ENV DYNO=miget
+
+ENTRYPOINT ${CMD_JSON}
+DOCKERFILE_FOOTER
+  else
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+USER ${DHI_USER}
+
+EXPOSE 5000
+ENV PORT=5000
+ENV DYNO=miget
+
+CMD ${CMD_JSON}
+DOCKERFILE_FOOTER
+  fi
+
+  # Update PROCFILE_PROCESSES_JSON with DHI-transformed command (no shell available)
+  # The deployment system should use this command directly without /bin/sh -c wrapper
+  if [ -n "$DHI_WEB_PROCESS" ] && [ "$PROCFILE_PROCESSES_JSON" != "{}" ]; then
+    PROCFILE_PROCESSES_JSON=$(echo "$PROCFILE_PROCESSES_JSON" | jq -c --arg web "$DHI_WEB_PROCESS" '.web = $web')
+
+    # For Ruby DHI: transform ALL processes (release, worker, etc.) - not just web
+    # DHI distroless images have no /usr/bin/env, so shebangs don't work
+    if [[ "$LANG_NORMALIZED" == "ruby" ]]; then
+      # Transform simple string processes (release, etc.) - exclude "web" (already done), "workers" (array)
+      PROCESS_NAMES=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r 'keys[] | select(startswith("_") | not) | select(. != "web") | select(. != "workers")')
+      for PROC_NAME in $PROCESS_NAMES; do
+        PROC_CMD=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r --arg name "$PROC_NAME" '.[$name] // empty')
+        if [ -n "$PROC_CMD" ]; then
+          # Apply Ruby DHI transformations (keep bundle exec, transform shebang scripts)
+          if [[ "$PROC_CMD" == "bundle exec ./bin/"* ]]; then
+            PROC_CMD="bundle exec ruby ${PROC_CMD#bundle exec ./}"
+          elif [[ "$PROC_CMD" == "bundle exec bin/"* ]]; then
+            PROC_CMD="bundle exec ruby ${PROC_CMD#bundle exec }"
+          elif [[ "$PROC_CMD" == "./bin/"* ]]; then
+            PROC_CMD="ruby ${PROC_CMD#./}"
+          elif [[ "$PROC_CMD" == "bin/"* ]]; then
+            PROC_CMD="ruby $PROC_CMD"
+          fi
+          PROCFILE_PROCESSES_JSON=$(echo "$PROCFILE_PROCESSES_JSON" | jq -c --arg name "$PROC_NAME" --arg cmd "$PROC_CMD" '.[$name] = $cmd')
+        fi
+      done
+
+      # Transform workers array (each worker has {name, command})
+      WORKERS_COUNT=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r '.workers // [] | length')
+      if [ "$WORKERS_COUNT" -gt 0 ]; then
+        TRANSFORMED_WORKERS="[]"
+        for i in $(seq 0 $((WORKERS_COUNT - 1))); do
+          WORKER_NAME=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r ".workers[$i].name")
+          WORKER_CMD=$(echo "$PROCFILE_PROCESSES_JSON" | jq -r ".workers[$i].command")
+          # Apply Ruby DHI transformations to worker command (keep bundle exec, transform shebang scripts)
+          if [[ "$WORKER_CMD" == "bundle exec ./bin/"* ]]; then
+            WORKER_CMD="bundle exec ruby ${WORKER_CMD#bundle exec ./}"
+          elif [[ "$WORKER_CMD" == "bundle exec bin/"* ]]; then
+            WORKER_CMD="bundle exec ruby ${WORKER_CMD#bundle exec }"
+          elif [[ "$WORKER_CMD" == "./bin/"* ]]; then
+            WORKER_CMD="ruby ${WORKER_CMD#./}"
+          elif [[ "$WORKER_CMD" == "bin/"* ]]; then
+            WORKER_CMD="ruby $WORKER_CMD"
+          fi
+          TRANSFORMED_WORKERS=$(echo "$TRANSFORMED_WORKERS" | jq -c --arg name "$WORKER_NAME" --arg cmd "$WORKER_CMD" '. + [{"name": $name, "command": $cmd}]')
+        done
+        PROCFILE_PROCESSES_JSON=$(echo "$PROCFILE_PROCESSES_JSON" | jq -c --argjson workers "$TRANSFORMED_WORKERS" '.workers = $workers')
+      fi
+    fi
+
+    # Add metadata indicating no shell is available (deployment should use exec format)
+    PROCFILE_PROCESSES_JSON=$(echo "$PROCFILE_PROCESSES_JSON" | jq -c '. + {_dhi: true, _shell: false}')
+  fi
+else
+  # Check if .profile.d exists for runtime environment setup
+  HAS_PROFILE_D=false
+  if [ -d "$EFFECTIVE_SOURCE_DIR/.profile.d" ]; then
+    HAS_PROFILE_D=true
+    info "Found .profile.d scripts for runtime environment"
+  fi
+
+  if [ "$HAS_PROFILE_D" = true ]; then
+    # Include .profile.d sourcing in CMD
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+USER 1000
+
+EXPOSE 5000
+ENV PORT=5000
+ENV DYNO=miget
+
+# Source .profile.d scripts before running app
+CMD ["sh", "-c", "for f in /app/.profile.d/*.sh; do [ -r \"\\\$f\" ] && . \"\\\$f\"; done; exec $WEB_PROCESS"]
+DOCKERFILE_FOOTER
+  else
+    cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
+
+USER 1000
+
+EXPOSE 5000
+ENV PORT=5000
+ENV DYNO=miget
+
+CMD ["sh", "-c", "$WEB_PROCESS"]
+DOCKERFILE_FOOTER
+  fi
+fi
+
+# Build runtime image using official upstream images
+cd "$BUILD_DIR"
+
+# Enable BuildKit for registry caching support
+export DOCKER_BUILDKIT=1
+
+# Download package cache from S3 before build (for S3 caching mode)
+S3_CACHE_LOCAL="/tmp/package-cache"
+if [ -n "$S3_CACHE_BUCKET" ] && [ -n "$CACHE_KEY" ]; then
+  download_s3_cache "$S3_CACHE_LOCAL"
+  # Copy cache to build context so Dockerfile can COPY it
+  mkdir -p "$BUILD_DIR/.package-cache/npm" "$BUILD_DIR/.package-cache/yarn" "$BUILD_DIR/.package-cache/pnpm"
+  if [ -d "$S3_CACHE_LOCAL" ]; then
+    cp -r "$S3_CACHE_LOCAL"/* "$BUILD_DIR/.package-cache/" 2>/dev/null || true
+  fi
+  info "Package cache prepared for build"
+fi
+
+# Run build and show output
+BUILD_OUTPUT=$(mktemp)
+
+# BuildKit build
+BUILD_OUTPUT_FLAG="--push"
+if [ "$PUSH_IMAGE" = "false" ]; then
+  BUILD_OUTPUT_FLAG="--load"
+fi
+
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+BUILD_EXIT=${PIPESTATUS[0]}
+
+if [ "$BUILD_EXIT" -ne 0 ]; then
+  build_error=$(tail -20 "$BUILD_OUTPUT")
+  rm -f "$BUILD_OUTPUT"
+  handle_build_failure 1 "Docker build failed: $build_error"
+fi
+rm -f "$BUILD_OUTPUT"
+
+# Pull image for port detection (buildx --push doesn't load locally)
+docker pull "$OUTPUT_IMAGE" >/dev/null 2>&1 || true
+add_image_result "$OUTPUT_IMAGE"
+
+# Extract and upload package cache to S3 (only in S3 caching mode)
+if [ -n "$S3_CACHE_BUCKET" ] && [ -n "$CACHE_KEY" ]; then
+  rm -rf "$S3_CACHE_LOCAL"
+  extract_cache_from_image "$OUTPUT_IMAGE" "$S3_CACHE_LOCAL"
+  upload_s3_cache "$S3_CACHE_LOCAL"
+  rm -rf "$S3_CACHE_LOCAL"
+fi
+
+# Calculate build time
+BUILD_END=$(date +%s)
+BUILD_TIME=$((BUILD_END - BUILD_START))
+
+# Write result file if requested
+write_result_file "$BUILD_TIME" "$LANG_NORMALIZED" "success" 0 ""
+
+echo ""
+info "Image: $OUTPUT_IMAGE"
+info "Built in ${BUILD_TIME}s"
+echo ""

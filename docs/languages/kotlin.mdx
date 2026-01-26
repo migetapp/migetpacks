@@ -1,0 +1,176 @@
+---
+title: "Kotlin"
+description: "Build and deploy Kotlin applications with migetpacks using Gradle."
+---
+
+## Detection
+
+migetpacks detects a Kotlin application when any of the following conditions are met:
+
+- `settings.gradle.kts` exists
+- `.kt` files exist in `src/` directory
+- `build.gradle.kts` contains the `kotlin` plugin
+- `build.gradle` (Groovy DSL) contains a Kotlin plugin reference
+
+<Note>
+Kotlin detection takes priority over Java/Gradle detection. If your project has `build.gradle.kts` with Kotlin plugins, it will be identified as Kotlin rather than Java.
+</Note>
+
+## Version Detection
+
+### Kotlin Version
+
+Kotlin version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `.kotlin-version` | `2.1.0` |
+| `gradle.properties` (`kotlin.version`) | `kotlin.version=2.1.0` |
+| `build.gradle.kts` (plugin version) | `kotlin("jvm") version "2.1.0"` |
+| Default | `2.1.0` |
+
+### Java Version
+
+The JDK version used for compilation and runtime is read from:
+
+| Source | Example |
+|--------|---------|
+| `system.properties` | `java.runtime.version=21` |
+| Default | `21` |
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile using Eclipse Temurin JDK with Gradle:
+
+```dockerfile
+# Build stage
+FROM gradle:jdk21 AS builder
+WORKDIR /build
+
+# Kotlin build environment
+ENV JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+
+# Layer caching: copy Gradle build files first
+COPY gradlew ./
+COPY gradle/ gradle/
+COPY build.gradle* settings.gradle* ./
+
+# Download dependencies (cached if build files unchanged)
+RUN ./gradlew dependencies --no-daemon || true
+
+# Copy source code
+COPY . .
+
+# Build and cleanup
+RUN ./gradlew build -x test --no-daemon \
+    && rm -rf src/ gradle/ gradlew* build.gradle* settings.gradle*
+
+# Runtime stage
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+### Gradle Wrapper
+
+If `gradlew` is present in the project root, migetpacks uses the Gradle Wrapper for correct version compatibility. Otherwise, it falls back to the system Gradle.
+
+## Run Command
+
+The default run command for Kotlin applications:
+
+```bash
+java -jar build/libs/*.jar
+```
+
+Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: java -jar build/libs/myapp-1.0-all.jar
+```
+
+### JVM Configuration
+
+The following environment variables are set for production:
+
+| Variable | Value |
+|----------|-------|
+| `JAVA_OPTS` | `-Dfile.encoding=UTF-8 -XX:MaxRAMPercentage=80.0` |
+| `JAVA_TOOL_OPTIONS` | `-Dfile.encoding=UTF-8` |
+
+## Caching
+
+### Layer Caching
+
+Dependencies are cached by copying Gradle build files before the full source:
+
+| Cached Files | Purpose |
+|-------------|---------|
+| `build.gradle.kts` / `build.gradle` | Build configuration |
+| `settings.gradle.kts` / `settings.gradle` | Project settings |
+| `gradlew` + `gradle/` | Gradle Wrapper |
+
+| Scenario | Dependency Install |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | **Cached** |
+| Build file change | Runs |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, Gradle caches persist at:
+
+| Cache Path | Contents |
+|------------|----------|
+| `/cache/gradle` | Gradle caches and wrapper downloads |
+
+## DHI Support
+
+<Info>
+Docker Hardened Images are supported for Kotlin builds.
+</Info>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/eclipse-temurin:21-jdk-dev` |
+| Runtime | `dhi.io/eclipse-temurin:21` |
+
+### DHI Notes
+
+- Java version is read from `system.properties` (`java.runtime.version`), defaulting to 21.
+- Eclipse Temurin DHI JDK images include the JDK but Gradle must be available (via wrapper or system install).
+- Runtime images are distroless (no shell).
+- The `nonroot` user is used instead of the `miget` user.
+
+### Example with DHI
+
+```bash
+docker run --rm \
+  -v /path/to/kotlin-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-kotlin-app:latest \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/kotlin-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-kotlin-app:latest \
+  miget/migetpacks:latest
+```
+
+### With build cache
+
+```bash
+docker run --rm \
+  -v /path/to/kotlin-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/build-cache:/cache \
+  -e OUTPUT_IMAGE=my-kotlin-app:latest \
+  -e BUILD_CACHE_DIR=/cache \
+  miget/migetpacks:latest
+```

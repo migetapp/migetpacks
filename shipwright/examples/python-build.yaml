@@ -1,0 +1,37 @@
+apiVersion: shipwright.io/v1beta1
+kind: Build
+metadata:
+  name: python-example
+  namespace: default
+spec:
+  source:
+    type: Git
+    git:
+      url: https://github.com/example/python-app.git
+      revision: main
+
+  strategy:
+    name: migetpacks
+    kind: ClusterBuildStrategy
+
+  paramValues:
+    - name: language
+      value: "python"
+    - name: python-version
+      value: "3.13.4"
+    - name: run-command
+      value: "gunicorn app:app"
+
+  output:
+    image: registry.example.com/my-org/python-app:latest
+    credentials:
+      name: registry-credentials
+---
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  name: python-example-run-1
+  namespace: default
+spec:
+  build:
+    name: python-example

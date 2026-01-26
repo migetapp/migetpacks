@@ -1,0 +1,134 @@
+---
+title: "Deno"
+description: "Build and deploy Deno applications with automatic entry point detection."
+---
+
+## Detection
+
+migetpacks detects Deno when any of these files are present in your project root:
+
+- `deno.json`
+- `deno.jsonc`
+- `deno.lock`
+
+<Note>
+Deno detection takes priority over Node.js. If both `deno.json` and `package.json` exist, migetpacks will detect Deno as the primary language.
+</Note>
+
+## Version Detection
+
+Deno version is resolved in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `DENO_VERSION` env var | `DENO_VERSION=2.0` |
+| 2 | `.deno-version` file | `2.6.1` |
+| 3 | `.dvmrc` file | `2.6.1` |
+| 4 | `version` field in `deno.json` | `"2.6.1"` |
+| 5 | Default | `2.6.1` |
+
+## Build Process
+
+migetpacks generates a Dockerfile that caches dependencies separately from source code:
+
+```dockerfile
+FROM denoland/deno:2.6.1 AS builder
+WORKDIR /build
+
+# Set Deno cache inside build dir
+ENV DENO_DIR=/build/.deno-cache
+
+# Layer 1: Copy dependency files (cached if deno.json unchanged)
+COPY deno.json deno.lock* ./
+
+# Layer 2: Install dependencies
+RUN deno install
+
+# Layer 3: Copy source code
+COPY . .
+
+# Layer 4: Cache and compile entry point
+RUN deno cache main.ts
+
+# Runtime stage
+FROM denoland/deno:2.6.1
+WORKDIR /app
+COPY --from=builder /build /app
+ENV DENO_DIR=/app/.deno-cache
+```
+
+### Entry Point Detection
+
+The entry point is automatically detected in this order:
+
+1. `start` task in `deno.json` (extracts the `.ts`/`.js` file from the command)
+2. Common file patterns: `main.ts`, `mod.ts`, `server.ts`, `app.ts`, `index.ts`, `index.js`, `main.js`, `src/main.ts`, `src/mod.ts`
+3. Falls back to `main.ts`
+
+### Dependency Caching
+
+If `deno.json` contains an `imports` field, `deno install` is run in a separate layer before source code is copied. This ensures dependencies are cached when only source code changes.
+
+## Run Command
+
+The default run command is determined in this order:
+
+| Priority | Source | Command |
+|----------|--------|---------|
+| 1 | `RUN_COMMAND` env var | User-specified |
+| 2 | `web:` in Procfile | From Procfile |
+| 3 | Default | `deno run --allow-net --allow-read --allow-env {entrypoint}` |
+
+The entry point is detected automatically (see Entry Point Detection above).
+
+## Caching
+
+### Docker Layer Caching
+
+Dependencies are installed from `deno.json` in a separate layer. The `deno cache` command pre-compiles the entry point and its dependencies, which are stored in `DENO_DIR` inside the build directory.
+
+### Registry Cache
+
+Use `CACHE_IMAGE` to push/pull BuildKit inline cache layers to a registry for cross-build caching.
+
+<Note>
+Deno does not use BuildKit cache mounts since dependency caching is handled through the `DENO_DIR` environment variable and Docker layer caching.
+</Note>
+
+## DHI Support
+
+<Check>Deno is supported with Docker Hardened Images (requires version 2.6.4 or later).</Check>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/deno:{version}-dev` |
+| Runtime | `dhi.io/deno:{version}` |
+
+<Warning>
+DHI images for Deno are only available starting from version 2.6.4. If your project uses an older version, migetpacks will fall back to the standard `denoland/deno` images.
+</Warning>
+
+The DHI runtime image runs as the `deno` user (non-root) and is distroless with no shell.
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-deno-app:latest \
+  miget/migetpacks:latest
+```
+
+### With Custom Options
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/app:v1 \
+  -e DENO_VERSION=2.6.1 \
+  -e RUN_COMMAND="deno run --allow-all server.ts" \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```

@@ -1,0 +1,186 @@
+---
+title: "Monorepo Support"
+description: "Build specific services or packages within a monorepo using PROJECT_PATH for subdirectory targeting."
+---
+
+## Overview
+
+migetpacks supports monorepo projects through the `PROJECT_PATH` environment variable. This allows you to target a specific subdirectory within your source tree for language detection, version detection, and building.
+
+## Basic Usage
+
+Set `PROJECT_PATH` to the subdirectory you want to build:
+
+```bash
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-api:latest \
+  -e PROJECT_PATH=services/api \
+  miget/migetpacks:latest
+```
+
+<Note>
+`PROJECT_PATH` is relative to `SOURCE_DIR` (defaults to `/workspace/source`). The builder will detect language and version from the specified subdirectory.
+</Note>
+
+## Example Monorepo Structure
+
+```text
+my-monorepo/
+├── services/
+│   ├── api/              # Go service
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── main.go
+│   ├── web/              # Node.js frontend
+│   │   ├── package.json
+│   │   └── src/
+│   └── worker/           # Python worker
+│       ├── requirements.txt
+│       └── worker.py
+├── shared/
+│   └── proto/
+└── docker-compose.yaml
+```
+
+### Building Each Service
+
+<CodeGroup>
+```bash API Service (Go)
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-api:latest \
+  -e PROJECT_PATH=services/api \
+  miget/migetpacks:latest
+```
+
+```bash Web Frontend (Node.js)
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-web:latest \
+  -e PROJECT_PATH=services/web \
+  miget/migetpacks:latest
+```
+
+```bash Worker (Python)
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-worker:latest \
+  -e PROJECT_PATH=services/worker \
+  miget/migetpacks:latest
+```
+</CodeGroup>
+
+## Combining with DOCKERFILE_PATH
+
+For services that have custom Dockerfiles in non-standard locations:
+
+```bash
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-api:latest \
+  -e PROJECT_PATH=services/api \
+  -e DOCKERFILE_PATH=docker/Dockerfile.prod \
+  miget/migetpacks:latest
+```
+
+<Note>
+When both `PROJECT_PATH` and `DOCKERFILE_PATH` are set, `DOCKERFILE_PATH` is resolved relative to the `PROJECT_PATH` subdirectory. In the example above, the Dockerfile is located at `services/api/docker/Dockerfile.prod`.
+</Note>
+
+## CI/CD with Monorepos
+
+### GitHub Actions Matrix
+
+Build multiple services in parallel using a matrix strategy:
+
+```yaml
+name: Build Services
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        service:
+          - name: api
+            path: services/api
+            language: go
+          - name: web
+            path: services/web
+            language: nodejs
+          - name: worker
+            path: services/worker
+            language: python
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: your-registry.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build ${{ matrix.service.name }}
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace/source:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e OUTPUT_IMAGE=your-registry.io/${{ matrix.service.name }}:${{ github.sha }} \
+            -e PROJECT_PATH=${{ matrix.service.path }} \
+            miget/migetpacks:latest
+```
+
+### Shipwright BuildRun
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  name: api-build
+spec:
+  build:
+    name: my-monorepo
+  paramValues:
+    - name: PROJECT_PATH
+      value: services/api
+    - name: OUTPUT_IMAGE
+      value: registry.io/my-api:latest
+```
+
+## How Language Detection Works with PROJECT_PATH
+
+When `PROJECT_PATH` is set, language detection examines only the files within that subdirectory:
+
+<Steps>
+  <Step title="Source directory is resolved">
+    The effective source becomes `SOURCE_DIR/PROJECT_PATH` (e.g., `/workspace/source/services/api`).
+  </Step>
+  <Step title="Language detection runs">
+    Files like `go.mod`, `package.json`, `requirements.txt`, etc. are searched within the subdirectory.
+  </Step>
+  <Step title="Version detection runs">
+    Version files (`.nvmrc`, `.ruby-version`, `go.mod`, etc.) are read from the subdirectory.
+  </Step>
+  <Step title="Build context is set">
+    The Docker build context is the subdirectory, so only those files are included in the image.
+  </Step>
+</Steps>
+
+## Tips
+
+- Each service gets its own `OUTPUT_IMAGE`, so they can be deployed independently
+- Language detection is automatic per subdirectory, no need to set `LANGUAGE` manually
+- Shared dependencies (e.g., Go workspaces) should be handled via the service's own dependency management
+- Use `BUILD_CACHE_DIR` with a shared volume to speed up builds across services

@@ -1,0 +1,5 @@
+{
+  "name": "dockerfile-example",
+  "version": "1.0.0",
+  "description": "Dockerfile Example for Migetpacks - demonstrates custom Dockerfile support"
+}

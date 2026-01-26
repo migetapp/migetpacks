@@ -1,0 +1,35 @@
+/* Enlarge logo */
+img.nav-logo {
+  height: 64px !important;
+  width: auto !important;
+}
+
+/* Add migetpacks text next to logo */
+a[href="/"]:has(img.nav-logo) {
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+}
+
+a[href="/"]:has(img.nav-logo)::after {
+  content: 'migetpacks';
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #A78BFA;
+}
+
+/* Hide Mintlify branding link in footer */
+a[href*="mintlify.com"] {
+  display: none !important;
+}
+
+footer a[href*="mintlify"] {
+  display: none !important;
+}
+
+/* Hide "Powered by" or similar branding text */
+footer [class*="powered"],
+footer [class*="branding"],
+footer div:has(a[href*="mintlify"]) {
+  display: none !important;
+}

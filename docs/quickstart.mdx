@@ -1,0 +1,141 @@
+---
+title: "Quickstart"
+description: "Build your first container in 3 commands"
+---
+
+## Prerequisites
+
+<Card title="Docker" icon="docker">
+  You need Docker installed and running on your machine. Any version with BuildKit support (18.09+) works.
+</Card>
+
+## Build Your First Container
+
+<Steps>
+  <Step title="Pull migetpacks">
+    Download the latest migetpacks image from Docker Hub:
+
+    ```bash
+    docker pull miget/migetpacks:latest
+    ```
+  </Step>
+
+  <Step title="Run a build">
+    Point migetpacks at your application source code. It will auto-detect the language, version, and build configuration:
+
+    ```bash
+    docker run --rm \
+      -v /path/to/your/app:/workspace/source \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e OUTPUT_IMAGE=my-app:local \
+      miget/migetpacks:latest
+    ```
+
+    Replace `/path/to/your/app` with the absolute path to your project directory.
+
+    <Info>
+      When `OUTPUT_IMAGE` does not contain a registry prefix (e.g., `my-app:local` instead of `registry.io/my-app:latest`), the image stays on your local Docker daemon and is not pushed anywhere.
+    </Info>
+  </Step>
+
+  <Step title="Test the built image">
+    Run your newly built container:
+
+    ```bash
+    docker run --rm -p 5000:5000 my-app:local
+    ```
+
+    Open [http://localhost:5000](http://localhost:5000) in your browser to see your app running.
+  </Step>
+</Steps>
+
+## What Happened?
+
+When you ran migetpacks, it performed four steps automatically:
+
+<Steps>
+  <Step title="Language Detection">
+    Scanned your source code for language markers (`package.json`, `Gemfile`, `go.mod`, `requirements.txt`, etc.) and identified the runtime.
+  </Step>
+  <Step title="Version Detection">
+    Read version files (`.nvmrc`, `.ruby-version`, `.python-version`, `go.mod`) and lock files to determine the exact runtime version.
+  </Step>
+  <Step title="Dockerfile Generation">
+    Generated an optimized multi-stage Dockerfile with dependency layer caching, build commands, and a minimal runtime stage.
+  </Step>
+  <Step title="Build and Output">
+    Used Docker-in-Docker with BuildKit to build the image and load it into your local Docker daemon.
+  </Step>
+</Steps>
+
+## Common Options
+
+<CodeGroup>
+
+```bash Specify Language
+docker run --rm \
+  -v /path/to/your/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e LANGUAGE=ruby \
+  miget/migetpacks:latest
+```
+
+```bash Custom Port
+docker run --rm \
+  -v /path/to/your/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e PORT=3000 \
+  miget/migetpacks:latest
+```
+
+```bash Custom Run Command
+docker run --rm \
+  -v /path/to/your/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e RUN_COMMAND="bundle exec puma -C config/puma.rb" \
+  miget/migetpacks:latest
+```
+
+```bash Hardened Images (DHI)
+docker run --rm \
+  -v /path/to/your/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+</CodeGroup>
+
+## Push to a Registry
+
+To push the built image to a remote registry, use a fully-qualified image name and mount your Docker credentials:
+
+```bash
+docker run --rm \
+  -v /path/to/your/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v $HOME/.docker/config.json:/root/.docker/config.json:ro \
+  -e OUTPUT_IMAGE=registry.io/myorg/my-app:latest \
+  miget/migetpacks:latest
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="How It Works" icon="gears" href="/how-it-works">
+    Understand the detection, generation, and build pipeline in detail.
+  </Card>
+  <Card title="Environment Variables" icon="sliders" href="/configuration/environment-variables">
+    Full reference for all configuration options.
+  </Card>
+  <Card title="GitHub Actions" icon="github" href="/guides/github-actions">
+    Set up migetpacks in your CI/CD pipeline.
+  </Card>
+  <Card title="Docker Hardened Images" icon="shield-halved" href="/guides/hardened-images">
+    Use distroless, CVE-free base images for production.
+  </Card>
+</CardGroup>

@@ -1,0 +1,196 @@
+---
+title: "Scala"
+description: "Build and deploy Scala applications with migetpacks using sbt."
+---
+
+## Detection
+
+migetpacks detects a Scala application when any of the following are present in the project root:
+
+- `build.sbt`
+- `build.sc`
+- `project/` directory
+
+## Version Detection
+
+### Scala Version
+
+Scala version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `.scala-version` | `3.5.2` |
+| `build.sbt` (`scalaVersion`) | `scalaVersion := "3.5.2"` |
+| `project/build.properties` (`scala.version`) | `scala.version=3.5.2` |
+| Default | `3.5.2` |
+
+### sbt Version
+
+sbt version is detected from:
+
+| Source | Example |
+|--------|---------|
+| `project/build.properties` | `sbt.version=1.10.6` |
+| Default | `1.10.6` |
+
+<Note>
+sbt 0.13.x is deprecated and will show a warning. sbt versions below 0.13.18 are not supported. sbt 2.x support is experimental.
+</Note>
+
+### Java Version
+
+The JDK version used for compilation and runtime is read from:
+
+| Source | Example |
+|--------|---------|
+| `system.properties` | `java.runtime.version=21` |
+| Default | `21` |
+
+Supported Java versions: 8, 11, 17, 21.
+
+## Build Process
+
+migetpacks uses the official `sbtscala/scala-sbt` Docker image which includes sbt, Scala, and the JDK:
+
+```dockerfile
+# Build stage
+FROM sbtscala/scala-sbt:eclipse-temurin-21.0.6_7_1.11.7_3.5.2 AS builder
+WORKDIR /build
+
+# Scala/sbt build environment
+ENV JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+ENV SBT_OPTS="-Xmx2G -XX:MaxMetaspaceSize=512m"
+
+# Layer caching: copy sbt build files first
+COPY build.sbt ./
+COPY project/ project/
+
+# Download dependencies (cached if build files unchanged)
+RUN sbt update || true
+
+# Copy source code
+COPY . .
+
+# Build and cleanup
+RUN sbt compile assembly \
+    && rm -rf src/ project/ build.sbt
+
+# Runtime stage
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+### Framework Detection
+
+migetpacks detects the application type and adjusts the build accordingly:
+
+| Detection | Build Command | Output |
+|-----------|--------------|--------|
+| Play Framework (`PlayScala`/`PlayJava` in `build.sbt`) | `sbt compile stage` | `target/universal/stage/` |
+| sbt-native-packager (in `project/plugins.sbt`) | `sbt compile stage` | `target/universal/stage/` |
+| Standard sbt project | `sbt compile assembly` | `target/scala-*/app.jar` |
+
+## Run Command
+
+The default run command depends on the project type:
+
+| Project Type | Default Command |
+|-------------|----------------|
+| Standard (assembly) | `java -jar target/scala-*/app.jar` |
+| Play Framework | `target/universal/stage/bin/{app-name}` |
+| sbt-native-packager | `target/universal/stage/bin/{app-name}` |
+
+Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: java -jar target/scala-3.5.2/myapp-assembly-1.0.jar
+```
+
+### JVM Configuration
+
+The following environment variables are set for production:
+
+| Variable | Value |
+|----------|-------|
+| `JAVA_OPTS` | `-Dfile.encoding=UTF-8 -XX:MaxRAMPercentage=80.0` |
+| `JAVA_TOOL_OPTIONS` | `-Dfile.encoding=UTF-8` |
+
+## Caching
+
+### Layer Caching
+
+Dependencies are cached by copying sbt build definition files before the full source:
+
+| Cached Files | Purpose |
+|-------------|---------|
+| `build.sbt` | Project build definition |
+| `project/` | sbt plugins, build properties, Scala version |
+
+| Scenario | Dependency Install |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | **Cached** |
+| Build file change | Runs |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, sbt and dependency caches persist at:
+
+| Cache Path | Contents |
+|------------|----------|
+| sbt cache | sbt boot and global settings |
+| ivy cache | Ivy repository (legacy dependencies) |
+| coursier cache | Coursier downloads (modern dependencies) |
+
+## DHI Support
+
+<Info>
+Docker Hardened Images are supported for Scala runtime.
+</Info>
+
+Scala uses a hybrid approach: the official `sbtscala` build image (which includes sbt tools) for building, and a DHI distroless image for runtime.
+
+| Stage | Image |
+|-------|-------|
+| Build | `sbtscala/scala-sbt:eclipse-temurin-{jdk}_{sbt}_{scala}` (official) |
+| Runtime | `dhi.io/eclipse-temurin:{java}` |
+
+### DHI Notes
+
+- The build image is always the official sbtscala image (DHI does not provide sbt images).
+- Only the runtime stage uses DHI distroless Eclipse Temurin JRE.
+- Java version is read from `system.properties` (default: 21).
+- Runtime images are distroless (no shell).
+
+### Example with DHI
+
+```bash
+docker run --rm \
+  -v /path/to/scala-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-scala-app:latest \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/scala-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-scala-app:latest \
+  miget/migetpacks:latest
+```
+
+### Play Framework app
+
+```bash
+docker run --rm \
+  -v /path/to/play-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-play-app:latest \
+  -e RUN_COMMAND="target/universal/stage/bin/myapp -Dhttp.port=5000" \
+  miget/migetpacks:latest
+```

@@ -1,0 +1,196 @@
+apiVersion: shipwright.io/v1beta1
+kind: ClusterBuildStrategy
+metadata:
+  name: migetpacks
+  labels:
+    app: migetpacks
+    version: v1
+spec:
+  volumes:
+    - name: results
+      emptyDir: {}
+    - name: docker-storage
+      ephemeral:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 15Gi
+  steps:
+    - name: build-and-push
+      image: miget/migetpacks:latest
+      imagePullPolicy: Always
+      volumeMounts:
+        - name: results
+          mountPath: /workspace/output
+        - name: docker-storage
+          mountPath: /var/lib/docker
+      env:
+        # Required - Shipwright auto-mounts source, $(params.shp-source-root) is the path
+        - name: SOURCE_DIR
+          value: $(params.shp-source-root)
+        - name: OUTPUT_IMAGE
+          value: $(params.shp-output-image)
+        # Build options
+        - name: LANGUAGE
+          value: $(params.language)
+        - name: BUILD_COMMAND
+          value: $(params.build-command)
+        - name: RUN_COMMAND
+          value: $(params.run-command)
+        - name: PORT
+          value: $(params.port)
+        - name: ARCH
+          value: $(params.arch)
+        - name: USE_DHI
+          value: $(params.use-dhi)
+        # Monorepo and custom Dockerfile/Compose
+        - name: PROJECT_PATH
+          value: $(params.project-path)
+        - name: DOCKERFILE_PATH
+          value: $(params.dockerfile-path)
+        - name: COMPOSE_FILE
+          value: $(params.compose-file)
+        # Results for post-build steps
+        - name: RESULT_FILE
+          value: $(params.result-file)
+        # Caching
+        - name: CACHE_KEY
+          value: $(params.cache-key)
+        - name: CACHE_IMAGE
+          value: $(params.cache-image)
+        - name: CACHE_FROM
+          value: $(params.cache-from)
+        - name: CACHE_MODE
+          value: "max"
+        - name: CACHE_REGISTRY_INSECURE
+          value: $(params.cache-registry-insecure)
+        # Language version overrides
+        - name: NODE_VERSION
+          value: $(params.node-version)
+        - name: PYTHON_VERSION
+          value: $(params.python-version)
+        - name: GO_VERSION
+          value: $(params.go-version)
+        - name: RUBY_VERSION
+          value: $(params.ruby-version)
+        - name: RUSTUP_TOOLCHAIN
+          value: $(params.rust-toolchain)
+        - name: DENO_VERSION
+          value: $(params.deno-version)
+        - name: BUN_VERSION
+          value: $(params.bun-version)
+        - name: PHP_VERSION
+          value: $(params.php-version)
+        - name: JAVA_VERSION
+          value: $(params.java-version)
+        - name: DOTNET_VERSION
+          value: $(params.dotnet-version)
+        - name: ELIXIR_VERSION
+          value: $(params.elixir-version)
+        - name: SCALA_VERSION
+          value: $(params.scala-version)
+        - name: KOTLIN_VERSION
+          value: $(params.kotlin-version)
+        - name: MIX_ENV
+          value: $(params.mix-env)
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: 500m
+          memory: 2Gi
+        limits:
+          cpu: "2"
+          memory: 8Gi
+  parameters:
+    # Build options
+    - name: language
+      description: "Programming language (optional, auto-detected if not set)"
+      default: ""
+    - name: build-command
+      description: "Custom build command (optional)"
+      default: ""
+    - name: run-command
+      description: "Custom run command (optional, defaults per language)"
+      default: ""
+    - name: port
+      description: "Port the application listens on (default: 5000)"
+      default: "5000"
+    - name: arch
+      description: "Target architecture: x86_64, arm64 (default: x86_64)"
+      default: "x86_64"
+    - name: use-dhi
+      description: "Use Docker Hardened Images (dhi.io) when true, official images when false (default: false)"
+      default: "false"
+    # Monorepo and custom Dockerfile/Compose
+    - name: project-path
+      description: "Subdirectory within source for monorepo support (optional)"
+      default: ""
+    - name: dockerfile-path
+      description: "Custom Dockerfile path relative to project-path (optional)"
+      default: ""
+    - name: compose-file
+      description: "Custom compose file path (optional, auto-detects compose.yaml, docker-compose.yaml, etc.)"
+      default: ""
+    # Caching
+    - name: cache-key
+      description: "App identifier for package cache (review apps can share parent's cache key)"
+      default: ""
+    - name: cache-image
+      description: "Registry image for BuildKit layer cache (e.g., registry.example.com/myapp/cache)"
+      default: ""
+    - name: cache-from
+      description: "Fallback cache image to read from (e.g., registry.example.com/shared/cache)"
+      default: ""
+    - name: cache-registry-insecure
+      description: "Set to 'true' for HTTP registries"
+      default: "false"
+    # Results
+    - name: result-file
+      description: "Path to write build results JSON for post-build steps (default: empty, no results written)"
+      default: ""
+    # Language version overrides
+    - name: node-version
+      description: "Node.js version override (default: 22.16.0)"
+      default: ""
+    - name: python-version
+      description: "Python version override (default: 3.13.4)"
+      default: ""
+    - name: go-version
+      description: "Go version override (default: 1.25.0)"
+      default: ""
+    - name: ruby-version
+      description: "Ruby version override (default: 3.4.4)"
+      default: ""
+    - name: rust-toolchain
+      description: "Rust toolchain override (default: 1.92.0)"
+      default: ""
+    - name: deno-version
+      description: "Deno version override (default: 2.6.1)"
+      default: ""
+    - name: bun-version
+      description: "Bun version override (default: 1.3.4)"
+      default: ""
+    - name: php-version
+      description: "PHP version override (default: 8.3.29)"
+      default: ""
+    - name: java-version
+      description: "Java version override (default: 21)"
+      default: ""
+    - name: dotnet-version
+      description: ".NET version override (default: 8.0)"
+      default: ""
+    - name: elixir-version
+      description: "Elixir version override (default: 1.18.4)"
+      default: ""
+    - name: scala-version
+      description: "Scala version override (default: 3.5.2)"
+      default: ""
+    - name: kotlin-version
+      description: "Kotlin version override (default: 2.1.0)"
+      default: ""
+    - name: mix-env
+      description: "Elixir/Phoenix environment: prod, dev, test (default: prod)"
+      default: "prod"

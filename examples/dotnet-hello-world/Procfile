@@ -1,0 +1,1 @@
+web: dotnet bin/publish/dotnet-hello-world.dll

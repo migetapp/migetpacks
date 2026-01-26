@@ -1,0 +1,177 @@
+---
+title: ".NET"
+description: "Build and deploy .NET/C# applications with migetpacks."
+---
+
+## Detection
+
+migetpacks detects a .NET application when any of the following are present:
+
+- `*.sln` or `*.slnx` (solution files, root level)
+- `global.json` (root level)
+- `*.csproj`, `*.fsproj`, or `*.vbproj` (project files, up to 2 levels deep)
+
+## Version Detection
+
+.NET SDK version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `global.json` (`sdk.version`) | `{"sdk": {"version": "8.0.100"}}` |
+| `*.csproj` (`TargetFramework`) | `<TargetFramework>net8.0</TargetFramework>` |
+| Default | `8.0` |
+
+The `TargetFramework` value has the `net` prefix stripped (e.g., `net8.0` becomes `8.0`).
+
+## Build Process
+
+migetpacks generates a multi-stage Dockerfile using the official .NET SDK and ASP.NET runtime images:
+
+```dockerfile
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
+WORKDIR /build
+
+# .NET build optimizations
+ENV NUGET_XMLDOC_MODE=skip
+ENV DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+ENV DOTNET_NOLOGO=1
+
+# Copy source code
+COPY . .
+
+# Restore, build, and publish
+RUN dotnet restore \
+    && dotnet publish --configuration Release --no-restore -p:PublishDir=bin/publish
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+### Source Code Cleanup
+
+Since .NET is a compiled language, source code is completely removed from the runtime image after publishing:
+
+| Removed | Reason |
+|---------|--------|
+| `*.cs`, `*.fs`, `*.vb` | Source files (compiled to DLLs) |
+| `*.csproj`, `*.fsproj`, `*.vbproj` | Project files |
+| `*.sln`, `*.slnx` | Solution files |
+| `obj/` | Intermediate build files |
+| `bin/Release/net*/`, `bin/Debug/` | Non-publish build output |
+
+Only the `bin/publish/` directory contents are kept in the final image.
+
+### .NET Tool Restore
+
+If a `.config/dotnet-tools.json` is present, `dotnet tool restore` is run before the build to install any required .NET CLI tools.
+
+## Run Command
+
+The default run command for .NET applications:
+
+```bash
+dotnet MyApp.dll
+```
+
+migetpacks detects the main DLL from the publish output. Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: dotnet MyApp.dll --urls http://0.0.0.0:5000
+```
+
+### Runtime Configuration
+
+The following environment variables are set for production:
+
+| Variable | Value |
+|----------|-------|
+| `ASPNETCORE_ENVIRONMENT` | `Production` |
+| `DOTNET_RUNNING_IN_CONTAINER` | `true` |
+| `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` | `1` |
+| `DOTNET_CLI_TELEMETRY_OPTOUT` | `1` |
+| `ASPNETCORE_HTTP_PORTS` | `5000` |
+
+## Caching
+
+### Layer Caching
+
+The .NET build uses NuGet cache mounts for dependency caching:
+
+| Scenario | Dependency Restore |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | NuGet packages cached via mount |
+| Project file change | Runs restore |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, NuGet packages are cached via BuildKit mount at:
+
+| Cache Path | Contents |
+|------------|----------|
+| NuGet packages mount | `~/.nuget/packages` |
+
+## DHI Support
+
+<Info>
+Docker Hardened Images are supported for .NET builds.
+</Info>
+
+| Stage | Image |
+|-------|-------|
+| Build | `dhi.io/dotnet:{version}-sdk` |
+| Runtime | `dhi.io/aspnetcore:{version}` |
+
+### DHI Notes
+
+- Build SDK images include the full .NET SDK for compilation.
+- Runtime images are based on ASP.NET Core distroless images (no shell, no `apt-get`).
+- The `nonroot` user is used instead of the `miget` user.
+- Suitable for web APIs and ASP.NET Core applications.
+
+### Example with DHI
+
+```bash
+docker run --rm \
+  -v /path/to/dotnet-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-dotnet-app:latest \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/dotnet-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-dotnet-app:latest \
+  miget/migetpacks:latest
+```
+
+### Monorepo with PROJECT_PATH
+
+```bash
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-api:latest \
+  -e PROJECT_PATH=src/MyApi \
+  miget/migetpacks:latest
+```
+
+### With custom build command
+
+```bash
+docker run --rm \
+  -v /path/to/dotnet-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-dotnet-app:latest \
+  -e BUILD_COMMAND="dotnet publish -c Release -o /build/out" \
+  miget/migetpacks:latest
+```

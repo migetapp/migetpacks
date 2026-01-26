@@ -1,0 +1,6 @@
+{
+  "ipv6": false,
+  "experimental": true,
+  "ip6tables": false,
+  "storage-driver": "overlay2"
+}

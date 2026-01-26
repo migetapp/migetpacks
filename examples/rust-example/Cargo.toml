@@ -1,0 +1,9 @@
+[package]
+name = "rust-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

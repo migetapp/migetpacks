@@ -1,0 +1,186 @@
+---
+title: "Local Docker Builds"
+description: "Build and test container images locally using Docker Desktop without pushing to a remote registry."
+---
+
+## Overview
+
+migetpacks can build container images locally using your Docker socket. When `OUTPUT_IMAGE` does not contain a registry prefix, the built image stays on your local Docker daemon and is never pushed to a remote registry.
+
+## Prerequisites
+
+- Docker Desktop (Mac/Windows) or Docker Engine (Linux)
+- Docker daemon running
+- The migetpacks image pulled locally
+
+```bash
+docker pull miget/migetpacks:latest
+```
+
+<Info>
+migetpacks uses Docker-in-Docker internally. Docker Desktop on Mac and Windows handles this transparently through its Linux VM. No `--privileged` flag or special configuration is needed.
+</Info>
+
+## Building Locally
+
+Mount your application source code and the Docker socket, then run migetpacks:
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    docker run --rm \
+      -v $(pwd):/workspace/source:ro \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e OUTPUT_IMAGE=my-app:local \
+      miget/migetpacks:latest
+    ```
+  </Tab>
+  <Tab title="Windows (PowerShell)">
+    ```powershell
+    docker run --rm `
+      -v ${PWD}:/workspace/source:ro `
+      -v /var/run/docker.sock:/var/run/docker.sock `
+      -e OUTPUT_IMAGE=my-app:local `
+      miget/migetpacks:latest
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    docker run --rm \
+      -v $(pwd):/workspace/source:ro \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e OUTPUT_IMAGE=my-app:local \
+      miget/migetpacks:latest
+    ```
+  </Tab>
+</Tabs>
+
+Then test the built image:
+
+```bash
+docker run --rm -p 5000:5000 my-app:local
+```
+
+<Note>
+When `OUTPUT_IMAGE` does not contain a `/` with a registry domain (e.g., `my-app:local` vs `registry.io/my-app:latest`), the builder uses the local Docker daemon and the image will not be pushed.
+</Note>
+
+## Language Override
+
+By default, migetpacks auto-detects the language. You can override this with the `LANGUAGE` environment variable:
+
+<CodeGroup>
+```bash Node.js
+docker run --rm \
+  -v /path/to/your/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e LANGUAGE=nodejs \
+  miget/migetpacks:latest
+```
+
+```bash Python
+docker run --rm \
+  -v /path/to/your/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e LANGUAGE=python \
+  miget/migetpacks:latest
+```
+
+```bash Ruby
+docker run --rm \
+  -v /path/to/your/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e LANGUAGE=ruby \
+  miget/migetpacks:latest
+```
+</CodeGroup>
+
+## Custom Environment Variables
+
+Any environment variable not recognized by migetpacks is automatically injected into the generated Dockerfile as an `ENV` statement:
+
+```bash
+docker run --rm \
+  -v /path/to/your/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e NODE_OPTIONS="--max-old-space-size=4096" \
+  -e NEXT_PUBLIC_API_URL="http://localhost:3000" \
+  miget/migetpacks:latest
+```
+
+## Debugging Tips
+
+### Inspect Built Image Contents
+
+```bash
+docker run --rm my-app:local ls -la /app/
+```
+
+### Check Environment Variables
+
+```bash
+docker run --rm my-app:local env
+```
+
+### View the Generated Dockerfile
+
+The build output includes the generated Dockerfile content. Look for the `Dockerfile.runtime` section in the build logs.
+
+### Interactive Shell
+
+If the build succeeds but the app does not start correctly, you can override the entrypoint:
+
+```bash
+docker run --rm -it --entrypoint /bin/sh my-app:local
+```
+
+<Warning>
+DHI (Docker Hardened Images) containers are distroless and do not have a shell. You cannot use `--entrypoint /bin/sh` with DHI-built images. Use standard (non-DHI) builds for debugging.
+</Warning>
+
+### Check Exposed Ports
+
+```bash
+docker inspect my-app:local --format='{{json .Config.ExposedPorts}}'
+```
+
+## Architecture Override
+
+By default, migetpacks builds for `x86_64`. To build for a different architecture:
+
+```bash
+docker run --rm \
+  -v /path/to/your/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  -e ARCH=arm64 \
+  miget/migetpacks:latest
+```
+
+## Source Mount Options
+
+<Tabs>
+  <Tab title="Read-Only Mount (Recommended)">
+    Mount the source as read-only to prevent any modifications:
+    ```bash
+    -v /path/to/your/app:/workspace/source:ro
+    ```
+  </Tab>
+  <Tab title="Read-Write Mount">
+    If your build process needs to write to the source directory:
+    ```bash
+    -v /path/to/your/app:/workspace/source
+    ```
+  </Tab>
+  <Tab title="Subdirectory (Monorepo)">
+    For monorepo projects, mount the entire repo and use `PROJECT_PATH`:
+    ```bash
+    -v /path/to/monorepo:/workspace/source:ro \
+    -e PROJECT_PATH=services/api
+    ```
+  </Tab>
+</Tabs>

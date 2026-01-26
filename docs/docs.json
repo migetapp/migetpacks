@@ -1,0 +1,113 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "migetpacks",
+  "theme": "mint",
+  "colors": {
+    "primary": "#7C3AED",
+    "light": "#A78BFA",
+    "dark": "#5B21B6"
+  },
+  "logo": {
+    "light": "/logo/packs-icon.svg",
+    "dark": "/logo/packs-icon.svg"
+  },
+  "favicon": "/favicon.ico",
+  "css": "/public/custom.css",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": ["introduction", "quickstart", "how-it-works", "contributing"]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/local-docker",
+              "guides/github-actions",
+              "guides/multi-buildpack",
+              "guides/hardened-images",
+              "guides/build-caching",
+              "guides/monorepo",
+              "guides/custom-dockerfile",
+              "guides/docker-compose",
+              "guides/procfile"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment-variables",
+              "configuration/version-detection",
+              "configuration/app-json"
+            ]
+          },
+          {
+            "group": "Languages",
+            "pages": [
+              "languages/nodejs",
+              "languages/deno",
+              "languages/bun",
+              "languages/python",
+              "languages/ruby",
+              "languages/go",
+              "languages/rust",
+              "languages/php",
+              "languages/java",
+              "languages/kotlin",
+              "languages/scala",
+              "languages/clojure",
+              "languages/dotnet",
+              "languages/elixir"
+            ]
+          },
+          {
+            "group": "Deploying",
+            "pages": [
+              "deploying/miget",
+              "deploying/shipwright",
+              "deploying/kubernetes",
+              "deploying/self-hosted-runners"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/result-json",
+              "reference/runtime-container",
+              "reference/architecture"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "search": {
+    "prompt": "Search documentation..."
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Docker Hub",
+        "href": "https://hub.docker.com/r/miget/migetpacks"
+      }
+    ],
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/migetapp/migetpacks"
+    }
+  },
+  "footer": {
+    "socials": {
+      "website": "https://miget.com",
+      "x": "https://x.com/miget_com",
+      "github": "https://github.com/migetapp",
+      "linkedin": "https://www.linkedin.com/company/miget-inc"
+    }
+  }
+}

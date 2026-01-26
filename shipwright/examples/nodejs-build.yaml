@@ -1,0 +1,45 @@
+apiVersion: shipwright.io/v1beta1
+kind: Build
+metadata:
+  name: nodejs-example
+  namespace: default
+spec:
+  source:
+    type: Git
+    git:
+      url: https://github.com/example/nodejs-app.git
+      revision: main
+
+  strategy:
+    name: migetpacks
+    kind: ClusterBuildStrategy
+
+  paramValues:
+    - name: language
+      value: "nodejs"
+    - name: node-version
+      value: "22.16.0"
+    - name: build-command
+      value: "npm run build"
+    - name: run-command
+      value: "npm start"
+
+  output:
+    image: registry.example.com/my-org/nodejs-app:latest
+    credentials:
+      name: registry-credentials
+
+  timeout: 15m
+
+  retention:
+    succeededLimit: 5
+    failedLimit: 3
+---
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  name: nodejs-example-run-1
+  namespace: default
+spec:
+  build:
+    name: nodejs-example

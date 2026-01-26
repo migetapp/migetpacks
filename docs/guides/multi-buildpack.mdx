@@ -1,0 +1,169 @@
+---
+title: "Multi-Buildpack"
+description: "Combine multiple language runtimes in a single build for applications that need more than one language."
+---
+
+## Overview
+
+migetpacks supports multi-buildpack builds for applications that require multiple language runtimes. For example, a Ruby on Rails app that uses Node.js for asset compilation, or a Python app with a Node.js frontend build step.
+
+## How It Works
+
+Multi-buildpack builds use Docker multi-stage builds to copy runtimes from official images into the primary builder stage. All runtimes are available during the build, and builds run sequentially.
+
+```dockerfile
+# Primary builder with additional runtimes
+FROM ruby:3.2 AS builder
+WORKDIR /build
+
+# Copy Python runtime from python image
+COPY --from=python:3.11 /usr/local/bin/python* /usr/local/bin/
+COPY --from=python:3.11 /usr/local/lib/python3.11 /usr/local/lib/python3.11
+
+# Copy Node.js runtime from node image
+COPY --from=node:20 /usr/local/bin/node /usr/local/bin/
+COPY --from=node:20 /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+# All runtimes available - run builds sequentially
+RUN bundle install
+RUN pip install -r requirements.txt
+RUN npm install && npm run build
+```
+
+## Automatic Detection
+
+migetpacks automatically adds Node.js as a secondary buildpack when:
+- The primary language is **not** Node.js
+- A `package.json` file exists in the project root
+
+This handles the common case of Ruby/Python/Go apps that use Node.js for frontend asset compilation.
+
+<Note>
+Automatic Node.js detection only adds Node.js as a secondary buildpack for asset compilation. It does not change the primary language or the runtime base image.
+</Note>
+
+## Explicit Buildpack Ordering
+
+Use the `BUILDPACKS` environment variable to explicitly control which buildpacks run and in what order:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:latest \
+  -e BUILDPACKS=ruby,python,nodejs \
+  miget/migetpacks:latest
+```
+
+<Steps>
+  <Step title="First buildpack is the primary language">
+    The first entry determines the base image, runtime container, and main process. In the example above, `ruby` is the primary language.
+  </Step>
+  <Step title="Subsequent buildpacks add runtimes">
+    Additional entries (`python`, `nodejs`) copy their runtimes into the builder stage and execute their respective build commands.
+  </Step>
+  <Step title="Builds run sequentially">
+    Each buildpack's install and build commands run in order within the same builder stage.
+  </Step>
+</Steps>
+
+### Format
+
+The `BUILDPACKS` value accepts both short and namespaced formats:
+
+<CodeGroup>
+```bash Short Format
+BUILDPACKS=ruby,python,nodejs
+```
+
+```bash Namespaced Format
+BUILDPACKS=miget/ruby,miget/python,miget/nodejs
+```
+</CodeGroup>
+
+<Note>
+When `BUILDPACKS` is set, automatic detection is disabled. Only the specified buildpacks will be used.
+</Note>
+
+## Common Use Cases
+
+### Ruby + Node.js (Asset Compilation)
+
+Rails apps with Webpack, esbuild, or Vite for JavaScript bundling:
+
+```bash
+BUILDPACKS=ruby,nodejs
+```
+
+This installs Node.js dependencies (`npm install` or `yarn install`) and runs the build command (`npm run build`) before the Ruby app is finalized.
+
+### Ruby + Python (AI/ML)
+
+Ruby apps that use Python libraries for machine learning or data processing:
+
+```bash
+BUILDPACKS=ruby,python
+```
+
+### Python + Node.js (Frontend Build)
+
+Python API with a Node.js-built frontend:
+
+```bash
+BUILDPACKS=python,nodejs
+```
+
+### Full Stack Example
+
+Ruby app with Python for AI features and Node.js for assets:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e BUILDPACKS=ruby,python,nodejs \
+  miget/migetpacks:latest
+```
+
+## Runtime Container
+
+In the final runtime container (non-DHI builds), all secondary runtimes are copied from the builder stage:
+
+```dockerfile
+# Runtime stage: copy runtimes from builder
+FROM ruby:3.2-slim
+COPY --from=builder /usr/local/bin/python* /usr/local/bin/
+COPY --from=builder /usr/local/bin/node /usr/local/bin/
+COPY --from=builder /build /app
+```
+
+This means all languages are available at runtime, not just during the build.
+
+## DHI Limitation
+
+<Warning>
+When using `USE_DHI=true` with multiple buildpacks, only the primary language runtime is available in the final container. DHI images are distroless and single-runtime.
+
+- **Build-time**: All buildpacks work correctly (uses `-dev` images with shell and package manager)
+- **Runtime**: Only the primary language is available (distroless images cannot include additional runtimes)
+
+A warning is displayed when using `BUILDPACKS` with `USE_DHI=true`.
+</Warning>
+
+For DHI builds, ensure your application only needs secondary buildpacks at build time (e.g., Node.js for asset compilation that produces static files consumed by the primary runtime).
+
+## app.json Buildpacks
+
+You can also specify buildpacks via `app.json`:
+
+```json
+{
+  "buildpacks": [
+    {"url": "heroku/nodejs"},
+    {"url": "heroku/ruby"}
+  ]
+}
+```
+
+migetpacks maps Heroku buildpack names to its internal language identifiers (e.g., `heroku/ruby` becomes `ruby`).

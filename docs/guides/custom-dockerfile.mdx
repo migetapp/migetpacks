@@ -1,0 +1,217 @@
+---
+title: "Custom Dockerfile"
+description: "Use your own Dockerfile instead of the auto-generated one for projects with specific build requirements."
+---
+
+## Overview
+
+migetpacks prioritizes its optimized multi-stage builds for known languages. A `Dockerfile` in your project is only used as a **fallback** when no supported language is detected. To force migetpacks to use your Dockerfile, set `LANGUAGE=dockerfile` or `DOCKERFILE_PATH`.
+
+## Detection Priority
+
+<Steps>
+  <Step title="Explicit override (DOCKERFILE_PATH or LANGUAGE=dockerfile)">
+    If `DOCKERFILE_PATH` is set, or `LANGUAGE=dockerfile` is specified, your Dockerfile is used immediately.
+  </Step>
+  <Step title="Language detection">
+    migetpacks checks for supported languages (Ruby, Python, Go, Node.js, etc.) and generates an optimized build.
+  </Step>
+  <Step title="Dockerfile fallback">
+    Only if no supported language is detected, migetpacks falls back to using `Dockerfile` in your project root.
+  </Step>
+</Steps>
+
+<Info>
+This priority order ensures you get migetpacks' optimized builds by default. If your project has both `package.json` and `Dockerfile`, migetpacks will detect Node.js and generate its own Dockerfile. Use `LANGUAGE=dockerfile` to override this behavior.
+</Info>
+
+## Using DOCKERFILE_PATH
+
+Point to a specific Dockerfile when it is not in the default location:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e DOCKERFILE_PATH=docker/Dockerfile.prod \
+  miget/migetpacks:latest
+```
+
+<Note>
+`DOCKERFILE_PATH` is relative to the project root (or `PROJECT_PATH` if set). You can also use an absolute path.
+</Note>
+
+## Examples
+
+### Standard Dockerfile in Root
+
+If your project has a `Dockerfile` in the root directory, no extra configuration is needed:
+
+```text
+my-app/
+├── Dockerfile        # Used automatically
+├── src/
+├── package.json
+└── ...
+```
+
+```bash
+docker run --rm \
+  -v /path/to/my-app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  miget/migetpacks:latest
+```
+
+### Multiple Dockerfiles
+
+Projects with environment-specific Dockerfiles:
+
+```text
+my-app/
+├── docker/
+│   ├── Dockerfile.dev
+│   ├── Dockerfile.prod
+│   └── Dockerfile.test
+├── src/
+└── ...
+```
+
+<CodeGroup>
+```bash Production
+docker run --rm \
+  -v /path/to/my-app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e DOCKERFILE_PATH=docker/Dockerfile.prod \
+  miget/migetpacks:latest
+```
+
+```bash Development
+docker run --rm \
+  -v /path/to/my-app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:dev \
+  -e DOCKERFILE_PATH=docker/Dockerfile.dev \
+  miget/migetpacks:latest
+```
+</CodeGroup>
+
+### Monorepo with Custom Dockerfile
+
+Combine `PROJECT_PATH` and `DOCKERFILE_PATH`:
+
+```bash
+docker run --rm \
+  -v /path/to/monorepo:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-service:latest \
+  -e PROJECT_PATH=services/api \
+  -e DOCKERFILE_PATH=Dockerfile.production \
+  miget/migetpacks:latest
+```
+
+This looks for the Dockerfile at `services/api/Dockerfile.production`.
+
+## Use Cases
+
+### Custom Base Images
+
+When you need a specific base image not supported by migetpacks:
+
+```dockerfile
+FROM my-internal-registry.io/custom-base:latest
+
+WORKDIR /app
+COPY . .
+RUN make build
+
+EXPOSE 8080
+CMD ["./my-app"]
+```
+
+### Complex Multi-Stage Builds
+
+When your build process requires custom stages:
+
+```dockerfile
+FROM node:20 AS frontend
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
+
+FROM golang:1.22 AS backend
+WORKDIR /backend
+COPY go.* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /app
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=backend /app /app
+COPY --from=frontend /frontend/dist /static
+EXPOSE 8080
+CMD ["/app"]
+```
+
+### Specific Optimization Needs
+
+When you need fine-grained control over layer ordering, build arguments, or caching:
+
+```dockerfile
+FROM python:3.12-slim AS builder
+
+ARG PIP_INDEX_URL
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+# Layer-cached dependency install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+FROM python:3.12-slim
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /app /app
+WORKDIR /app
+EXPOSE 5000
+CMD ["python", "app.py"]
+```
+
+## Build Caching with Custom Dockerfiles
+
+Registry-based caching (`CACHE_IMAGE`) works with custom Dockerfiles:
+
+```bash
+docker run --rm \
+  -v /path/to/app:/workspace/source:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=registry.io/my-app:latest \
+  -e DOCKERFILE_PATH=Dockerfile \
+  -e CACHE_IMAGE=registry.io/my-app:buildcache \
+  -e CACHE_MODE=max \
+  miget/migetpacks:latest
+```
+
+<Warning>
+`BUILD_CACHE_DIR` and language-specific BuildKit cache mounts are only available in auto-generated Dockerfiles. If you use a custom Dockerfile, you must manage cache mounts yourself.
+</Warning>
+
+## What migetpacks Still Provides
+
+Even when using a custom Dockerfile, migetpacks handles:
+
+- Building the image with BuildKit
+- Pushing to the target registry (`OUTPUT_IMAGE`)
+- Registry-based caching (`CACHE_IMAGE`)
+- Architecture targeting (`ARCH`)
+- Registry mirror configuration (`REGISTRY_MIRROR`)
+- Result file generation (`RESULT_FILE`)
+- Port detection from the built image

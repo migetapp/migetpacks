@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+# Language detection script
+# Returns exit code 0 if a supported language is detected
+# Returns exit code 1 if no supported language found
+
+set -e
+
+BUILD_DIR=$1
+CACHE_DIR=$2
+ENV_DIR=$3
+
+# Support PROJECT_PATH for monorepo subdirectory
+# If PROJECT_PATH is set, use it as subdirectory within BUILD_DIR
+if [ -n "$PROJECT_PATH" ]; then
+  BUILD_DIR="${BUILD_DIR%/}/${PROJECT_PATH#/}"
+fi
+
+# Detect Node.js applications and package manager
+# Priority: lockfile > packageManager field > package.json
+# Sets NODEJS_PKG_MANAGER to npm, yarn, or pnpm
+# Sets NODEJS_MULTIPLE_LOCKFILES if conflicting lockfiles detected
+detect_nodejs() {
+  NODEJS_PKG_MANAGER=""
+  NODEJS_MULTIPLE_LOCKFILES=""
+
+  # Count lockfiles to detect conflicts
+  local lockfile_count=0
+  [ -f "$BUILD_DIR/package-lock.json" ] && lockfile_count=$((lockfile_count + 1))
+  [ -f "$BUILD_DIR/yarn.lock" ] && lockfile_count=$((lockfile_count + 1))
+  [ -f "$BUILD_DIR/pnpm-lock.yaml" ] && lockfile_count=$((lockfile_count + 1))
+
+  if [ "$lockfile_count" -gt 1 ]; then
+    NODEJS_MULTIPLE_LOCKFILES="true"
+  fi
+
+  # Check lockfiles first (most reliable) - priority: pnpm > yarn > npm
+  if [ -f "$BUILD_DIR/pnpm-lock.yaml" ]; then
+    NODEJS_PKG_MANAGER="pnpm"
+    return 0
+  fi
+  if [ -f "$BUILD_DIR/yarn.lock" ]; then
+    NODEJS_PKG_MANAGER="yarn"
+    return 0
+  fi
+  if [ -f "$BUILD_DIR/package-lock.json" ]; then
+    NODEJS_PKG_MANAGER="npm"
+    return 0
+  fi
+
+  # Check packageManager field in package.json (Corepack)
+  if [ -f "$BUILD_DIR/package.json" ]; then
+    local pkg_manager=$(grep -oE '"packageManager"[[:space:]]*:[[:space:]]*"[^"]*"' "$BUILD_DIR/package.json" 2>/dev/null | head -1)
+    if [ -n "$pkg_manager" ]; then
+      if echo "$pkg_manager" | grep -q "pnpm"; then
+        NODEJS_PKG_MANAGER="pnpm"
+        return 0
+      elif echo "$pkg_manager" | grep -q "yarn"; then
+        NODEJS_PKG_MANAGER="yarn"
+        return 0
+      elif echo "$pkg_manager" | grep -q "npm"; then
+        NODEJS_PKG_MANAGER="npm"
+        return 0
+      fi
+    fi
+    # Fallback: package.json exists without lockfile = npm
+    NODEJS_PKG_MANAGER="npm"
+    return 0
+  fi
+  return 1
+}
+
+# Detect Bun applications
+# Priority: lockfile > config > version file > bun-types dependency
+detect_bun() {
+  # Most reliable: Bun lockfiles
+  if [ -f "$BUILD_DIR/bun.lock" ] || [ -f "$BUILD_DIR/bun.lockb" ]; then
+    return 0
+  fi
+  # Bun config file
+  if [ -f "$BUILD_DIR/bunfig.toml" ]; then
+    return 0
+  fi
+  # Bun version file (like .nvmrc for Node)
+  if [ -f "$BUILD_DIR/.bun-version" ]; then
+    return 0
+  fi
+  # Check if package.json has bun-types dependency (weaker signal)
+  if [ -f "$BUILD_DIR/package.json" ]; then
+    if grep -qE '"bun-types"' "$BUILD_DIR/package.json" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Detect Ruby applications
+detect_ruby() {
+  if [ -f "$BUILD_DIR/Gemfile" ] || [ -f "$BUILD_DIR/Rakefile" ] || [ -f "$BUILD_DIR/config.ru" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Python applications
+detect_python() {
+  if [ -f "$BUILD_DIR/requirements.txt" ] || [ -f "$BUILD_DIR/setup.py" ] || [ -f "$BUILD_DIR/Pipfile" ] || [ -f "$BUILD_DIR/pyproject.toml" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Go applications
+detect_go() {
+  if [ -f "$BUILD_DIR/go.mod" ] || [ -f "$BUILD_DIR/Godeps/Godeps.json" ] || [ -f "$BUILD_DIR/glide.yaml" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Java/Maven applications
+detect_java_maven() {
+  if [ -f "$BUILD_DIR/pom.xml" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Java/Gradle applications
+detect_java_gradle() {
+  if [ -f "$BUILD_DIR/build.gradle" ] || [ -f "$BUILD_DIR/build.gradle.kts" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect PHP applications
+detect_php() {
+  if [ -f "$BUILD_DIR/composer.json" ] || [ -f "$BUILD_DIR/index.php" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect .NET applications
+detect_dotnet() {
+  # Check for solution files (.sln, .slnx) or global.json at root
+  if [ -f "$BUILD_DIR/global.json" ] || [ -n "$(find "$BUILD_DIR" -maxdepth 1 -name '*.sln' -o -name '*.slnx' 2>/dev/null)" ]; then
+    return 0
+  fi
+  # Check for project files up to 2 levels deep
+  if [ -n "$(find "$BUILD_DIR" -maxdepth 2 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null)" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Rust applications
+detect_rust() {
+  if [ -f "$BUILD_DIR/Cargo.toml" ] || [ -f "$BUILD_DIR/Cargo.lock" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Elixir applications
+detect_elixir() {
+  if [ -f "$BUILD_DIR/mix.exs" ] || [ -f "$BUILD_DIR/mix.lock" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Scala applications
+detect_scala() {
+  if [ -f "$BUILD_DIR/build.sbt" ] || [ -f "$BUILD_DIR/build.sc" ] || [ -d "$BUILD_DIR/project" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Clojure applications
+detect_clojure() {
+  # Leiningen project.clj or Clojure CLI deps.edn
+  if [ -f "$BUILD_DIR/project.clj" ] || [ -f "$BUILD_DIR/deps.edn" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Deno applications
+detect_deno() {
+  if [ -f "$BUILD_DIR/deno.json" ] || [ -f "$BUILD_DIR/deno.jsonc" ] || [ -f "$BUILD_DIR/deno.lock" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Kotlin applications
+detect_kotlin() {
+  # Check for Kotlin-specific files (settings.gradle.kts or any .kt files in project)
+  if [ -f "$BUILD_DIR/settings.gradle.kts" ]; then
+    return 0
+  fi
+  # Check for .kt files in src/ directory (standard Kotlin/Gradle layout)
+  if [ -n "$(find "$BUILD_DIR/src" -name '*.kt' 2>/dev/null | head -1)" ]; then
+    return 0
+  fi
+  # Check if build.gradle.kts has Kotlin plugin
+  if [ -f "$BUILD_DIR/build.gradle.kts" ] && grep -q "kotlin" "$BUILD_DIR/build.gradle.kts" 2>/dev/null; then
+    return 0
+  fi
+  # Check if build.gradle (Groovy DSL) has Kotlin plugin
+  if [ -f "$BUILD_DIR/build.gradle" ] && grep -qE "plugin.*kotlin|kotlin.*plugin|apply.*plugin.*kotlin" "$BUILD_DIR/build.gradle" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Dockerfile (user-provided Dockerfile)
+# Supports DOCKERFILE_PATH env var for custom location
+detect_dockerfile() {
+  # Check DOCKERFILE_PATH first (can be absolute or relative to BUILD_DIR)
+  if [ -n "$DOCKERFILE_PATH" ]; then
+    if [ -f "$DOCKERFILE_PATH" ]; then
+      return 0
+    elif [ -f "$BUILD_DIR/$DOCKERFILE_PATH" ]; then
+      return 0
+    fi
+  fi
+  # Default: check for Dockerfile in BUILD_DIR
+  if [ -f "$BUILD_DIR/Dockerfile" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Detect Docker Compose files
+# Supports COMPOSE_FILE env var or auto-detect with priority
+detect_compose() {
+  # Check COMPOSE_FILE first
+  if [ -n "$COMPOSE_FILE" ]; then
+    if [ -f "$COMPOSE_FILE" ]; then
+      return 0
+    elif [ -f "$BUILD_DIR/$COMPOSE_FILE" ]; then
+      return 0
+    fi
+  fi
+  # Auto-detect with priority: compose.yaml > compose.yml > docker-compose.yaml > docker-compose.yml
+  if [ -f "$BUILD_DIR/compose.yaml" ] || \
+     [ -f "$BUILD_DIR/compose.yml" ] || \
+     [ -f "$BUILD_DIR/docker-compose.yaml" ] || \
+     [ -f "$BUILD_DIR/docker-compose.yml" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Main detection logic
+detect_language() {
+  # Try to detect each language
+  # Priority: Backend frameworks first, then JS runtimes, then Dockerfile last
+  # Many backend frameworks (Rails, Django, Laravel, Phoenix, etc.) use package.json
+  # for asset compilation but are NOT Node.js apps
+  #
+  # Dockerfile detection is LAST because:
+  # - migetpacks generates optimized multi-stage builds for known languages
+  # - Users can force Dockerfile with LANGUAGE=dockerfile if needed
+
+  # Explicit overrides take priority - user knows what they want
+  if [ -n "$DOCKERFILE_PATH" ] && detect_dockerfile; then
+    echo "Dockerfile"
+    return 0
+  fi
+  if [ -n "$COMPOSE_FILE" ] && detect_compose; then
+    echo "Compose"
+    return 0
+  fi
+
+  # Check Deno first - has distinct deno.json (not just package.json)
+  if detect_deno; then
+    echo "Deno"
+    return 0
+  # Backend frameworks - check before Node.js/Bun
+  # These may have package.json for asset compilation
+  elif detect_ruby; then
+    echo "Ruby"
+    return 0
+  elif detect_python; then
+    echo "Python"
+    return 0
+  elif detect_go; then
+    echo "Go"
+    return 0
+  elif detect_rust; then
+    echo "Rust"
+    return 0
+  elif detect_elixir; then
+    echo "Elixir"
+    return 0
+  elif detect_scala; then
+    echo "Scala"
+    return 0
+  elif detect_clojure; then
+    echo "Clojure"
+    return 0
+  elif detect_kotlin; then
+    echo "Kotlin"
+    return 0
+  elif detect_java_maven; then
+    echo "Java (Maven)"
+    return 0
+  elif detect_java_gradle; then
+    echo "Java (Gradle)"
+    return 0
+  elif detect_php; then
+    echo "PHP"
+    return 0
+  elif detect_dotnet; then
+    echo ".NET"
+    return 0
+  # JavaScript runtimes - check after backend frameworks
+  elif detect_bun; then
+    echo "Bun"
+    return 0
+  elif detect_nodejs; then
+    if [ -n "$NODEJS_PKG_MANAGER" ] && [ "$NODEJS_PKG_MANAGER" != "npm" ]; then
+      echo "Node.js ($NODEJS_PKG_MANAGER)"
+    else
+      echo "Node.js"
+    fi
+    return 0
+  # Dockerfile fallback - only if no known language detected
+  # Users can force Dockerfile with LANGUAGE=dockerfile
+  elif detect_dockerfile; then
+    echo "Dockerfile"
+    return 0
+  fi
+
+  return 1
+}
+
+# Run detection
+if detect_language; then
+  exit 0
+else
+  exit 1
+fi

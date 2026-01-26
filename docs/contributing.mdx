@@ -1,0 +1,125 @@
+---
+title: "Contributing"
+description: "How to develop, test, and contribute to migetpacks."
+---
+
+migetpacks is open source and available on [GitHub](https://github.com/migetapp/migetpacks). Contributions are welcome under the [O'Saasy License](https://github.com/migetapp/migetpacks/blob/main/LICENSE).
+
+## Prerequisites
+
+- Docker (with BuildKit support)
+- Bash 4+
+- `make` (optional, for build shortcuts)
+
+## Project Structure
+
+```text
+bin/
+├── detect           # Language detection script
+├── detect-version   # Version detection script
+├── build            # Main build orchestrator
+├── release          # Release metadata (Procfile parsing)
+└── entrypoint.sh    # Container entrypoint (starts dockerd)
+
+lib/
+├── common.sh        # Shared helpers (output formatting, cache IDs)
+├── buildpacks.sh    # Multi-buildpack support
+├── nodejs.sh        # Node.js/npm/yarn/pnpm
+├── python.sh        # Python/pip/uv
+├── ruby.sh          # Ruby/Bundler/Rails
+├── go.sh            # Go modules
+├── rust.sh          # Rust/Cargo
+├── java.sh          # Java/Maven/Gradle
+├── kotlin.sh        # Kotlin/Gradle
+├── scala.sh         # Scala/sbt
+├── clojure.sh       # Clojure/Leiningen
+├── dotnet.sh        # .NET/C#
+├── php.sh           # PHP/Composer/FrankenPHP
+├── elixir.sh        # Elixir/Phoenix
+├── deno.sh          # Deno
+└── bun.sh           # Bun
+
+examples/            # Working example apps for each language
+test/                # Test scripts
+```
+
+## Development Commands
+
+```bash
+# Test the detect scripts
+./test/test-detect.sh
+
+# Detect language for an example app
+./bin/detect examples/nodejs-example
+
+# Detect version for an example app
+LANGUAGE=nodejs ./bin/detect-version examples/nodejs-example
+
+# Build the builder container
+make build
+
+# Push to registry
+make push
+```
+
+## Testing Locally
+
+You can test builds locally without pushing to a remote registry:
+
+```bash
+# Build the migetpacks container
+docker build -t migetpacks:local .
+
+# Run a local build (image stays local, won't push)
+docker run --rm \
+  -v /path/to/your/app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-app:local \
+  migetpacks:local
+
+# Test the built image
+docker run --rm -p 5000:5000 my-app:local
+```
+
+<Note>
+When `OUTPUT_IMAGE` does not contain a registry prefix (e.g., `my-app:local` vs `registry.io/my-app:latest`), the builder uses the local Docker daemon and the image is not pushed.
+</Note>
+
+### Debugging Tips
+
+- Check the generated Dockerfile in the build output (`Dockerfile.runtime`)
+- Inspect the built image: `docker run --rm my-app:local ls -la /app/`
+- Check environment: `docker run --rm my-app:local env`
+
+## Example Apps
+
+Working examples for all supported languages are in `examples/`:
+
+| Directory | Language |
+|-----------|----------|
+| `nodejs-example` | Node.js |
+| `deno-example` | Deno |
+| `bun-example` | Bun |
+| `python-example` | Python |
+| `ruby-example` | Ruby |
+| `go-hello-world` | Go |
+| `rust-example` | Rust |
+| `php-hello-world` | PHP |
+| `java-hello-world` | Java |
+| `kotlin-example` | Kotlin |
+| `scala-example` | Scala |
+| `dotnet-hello-world` | .NET |
+| `elixir-example` | Elixir |
+| `dockerfile-example` | Custom Dockerfile |
+| `compose-example` | Docker Compose |
+
+## Adding a New Language
+
+To add support for a new language:
+
+1. Add a detection function in `bin/detect`
+2. Add a version detection function in `bin/detect-version`
+3. Create a `lib/{language}.sh` with `{language}_get_images()`, `{language}_generate_builder()`, and `{language}_generate_runtime()` functions
+4. Wire the new language into `bin/build`
+5. Add an example app in `examples/`
+6. Add tests in `test/`

@@ -1,0 +1,186 @@
+---
+title: "Clojure"
+description: "Build and deploy Clojure applications with migetpacks using Leiningen."
+---
+
+## Detection
+
+migetpacks detects a Clojure application when either of the following files is present in the project root:
+
+- `project.clj` (Leiningen)
+- `deps.edn` (Clojure CLI/tools.deps)
+
+## Version Detection
+
+### Clojure Version
+
+Clojure version is resolved in the following priority order:
+
+| Source | Example |
+|--------|---------|
+| `.clojure-version` | `1.11.1` |
+| `project.clj` (org.clojure/clojure dependency) | `[org.clojure/clojure "1.11.1"]` |
+| `deps.edn` (org.clojure/clojure) | `org.clojure/clojure {:mvn/version "1.11.1"}` |
+| Default | `1.11.1` |
+
+### Leiningen Version
+
+Leiningen version is detected from:
+
+| Source | Example |
+|--------|---------|
+| `project.clj` (`:min-lein-version`) | `:min-lein-version "2.11.2"` |
+| Default | `2.11.2` |
+
+### Java Version
+
+The JDK version used for compilation and runtime is read from:
+
+| Source | Example |
+|--------|---------|
+| `system.properties` | `java.runtime.version=21` |
+| Default | `21` |
+
+## Build Process
+
+migetpacks uses the official `clojure:temurin-{java}-lein` Docker image which includes Leiningen and the JDK:
+
+```dockerfile
+# Build stage
+FROM clojure:temurin-21-lein AS builder
+WORKDIR /build
+
+# Clojure build environment
+ENV JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+ENV LEIN_ROOT=1
+
+# Layer caching: copy project.clj first
+COPY project.clj ./
+
+# Download dependencies (cached if project.clj unchanged)
+RUN lein deps
+
+# Copy source code
+COPY . .
+
+# Build uberjar and cleanup
+RUN lein uberjar \
+    && rm -rf src/ test/ dev/ resources/public/js/compiled
+
+# Runtime stage
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build /app
+```
+
+### Uberjar Detection
+
+migetpacks detects custom uberjar names from `project.clj`:
+
+```clojure
+(defproject myapp "1.0.0"
+  :uberjar-name "myapp-standalone.jar"
+  ...)
+```
+
+If `:uberjar-name` is specified, migetpacks uses it when configuring the run command.
+
+## Run Command
+
+The default run command for Clojure applications:
+
+```bash
+java -jar target/uberjar/*-standalone.jar
+```
+
+Override with `RUN_COMMAND` or a `Procfile`:
+
+```text
+web: java -jar target/uberjar/myapp-standalone.jar
+```
+
+### JVM Configuration
+
+The following environment variables are set for production:
+
+| Variable | Value |
+|----------|-------|
+| `JAVA_OPTS` | `-Dfile.encoding=UTF-8 -XX:MaxRAMPercentage=80.0 -Dclojure.main.report=stderr` |
+| `JAVA_TOOL_OPTIONS` | `-Dfile.encoding=UTF-8` |
+
+## Caching
+
+### Layer Caching
+
+Dependencies are cached by copying `project.clj` before the full source:
+
+| Cached Files | Purpose |
+|-------------|---------|
+| `project.clj` | Leiningen project definition with dependencies |
+
+| Scenario | Dependency Install |
+|----------|-------------------|
+| First build | Runs |
+| Source code change only | **Cached** |
+| project.clj change | Runs |
+
+### BUILD_CACHE_DIR
+
+When `BUILD_CACHE_DIR` is set, Leiningen and Maven caches persist at:
+
+| Cache Path | Contents |
+|------------|----------|
+| lein cache | Leiningen profiles and plugins |
+| m2 cache | Maven repository (`.m2`) |
+
+## DHI Support
+
+<Info>
+Docker Hardened Images are supported for Clojure runtime.
+</Info>
+
+Clojure uses a hybrid approach: the official Clojure build image (which includes Leiningen) for building, and a DHI distroless image for runtime.
+
+| Stage | Image |
+|-------|-------|
+| Build | `clojure:temurin-{java}-lein` (official) |
+| Runtime | `dhi.io/eclipse-temurin:{java}` |
+
+### DHI Notes
+
+- The build image is always the official Clojure image (DHI does not provide Clojure/Leiningen images).
+- Only the runtime stage uses DHI distroless Eclipse Temurin JRE.
+- Java version is read from `system.properties` (default: 21).
+- Runtime images are distroless (no shell).
+
+### Example with DHI
+
+```bash
+docker run --rm \
+  -v /path/to/clojure-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-clojure-app:latest \
+  -e USE_DHI=true \
+  miget/migetpacks:latest
+```
+
+## Example
+
+```bash
+docker run --rm \
+  -v /path/to/clojure-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-clojure-app:latest \
+  miget/migetpacks:latest
+```
+
+### With custom JVM options
+
+```bash
+docker run --rm \
+  -v /path/to/clojure-app:/workspace/source \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e OUTPUT_IMAGE=my-clojure-app:latest \
+  -e JAVA_OPTS="-Xmx1g -Dclojure.main.report=stderr" \
+  miget/migetpacks:latest
+```

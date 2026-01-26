@@ -1,0 +1,29 @@
+{
+  "name": "Ruby Example",
+  "description": "Example Ruby/Sinatra application for migetpacks",
+  "env": {
+    "RACK_ENV": {
+      "value": "production"
+    },
+    "SECRET_KEY": {
+      "description": "Secret key for sessions",
+      "generator": "secret"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1
+    },
+    "worker": {
+      "quantity": 1
+    }
+  },
+  "scripts": {
+    "postdeploy": "echo 'Deployment complete!'"
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/ruby"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+---
+title: "Miget"
+description: "Deploy with migetpacks on the Miget platform"
+---
+
+## What is Miget?
+
+[Miget](https://miget.com) is the platform that created and maintains migetpacks. When you deploy on Miget, migetpacks is natively integrated. Your code is automatically detected, built, and deployed without any configuration.
+
+Miget lets you run unlimited applications on a single compute resource with a fair scheduler that intelligently distributes CPU across your workloads. Each app runs in an isolated microVM with managed databases, custom domains, and unmetered bandwidth included.
+
+## How it works
+
+Push your code to Miget and the platform automatically uses migetpacks to:
+
+- Detect your language and version from source
+- Generate an optimized multi-stage Dockerfile
+- Build a secure, non-root container image
+- Deploy it across Miget's infrastructure
+
+No Dockerfile, no build configuration, and no CI pipeline to maintain.
+
+## Why Miget
+
+<CardGroup cols={2}>
+  <Card title="Pay per resource, not per app" icon="coins">
+    Run as many apps as you need on shared compute. No per-app billing, no surprise costs.
+  </Card>
+  <Card title="Managed databases" icon="database">
+    PostgreSQL, MySQL, and Valkey, provisioned in seconds alongside your apps.
+  </Card>
+  <Card title="Isolated microVMs" icon="shield-halved">
+    Every app runs in its own secure VM with CIS and FIPS 140-2 compliance.
+  </Card>
+  <Card title="Multi-region" icon="globe">
+    Deploy to EU and US regions today, with more locations coming soon.
+  </Card>
+</CardGroup>
+
+## Getting started
+
+Sign up at [miget.com](https://miget.com) and connect your repository. Miget handles the rest.

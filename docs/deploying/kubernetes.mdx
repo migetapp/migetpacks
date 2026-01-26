@@ -1,0 +1,313 @@
+---
+title: "Kubernetes"
+description: "Running migetpacks as Kubernetes Jobs"
+---
+
+## Overview
+
+You can run migetpacks as a Kubernetes Job for one-off or scheduled builds without needing the full Shipwright framework. This approach gives you direct control over the build process while still leveraging Kubernetes for orchestration.
+
+## Kubernetes Job
+
+A basic Job that builds and pushes a container image:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: build-my-app
+  namespace: builds
+spec:
+  backoffLimit: 0  # Don't retry failed builds
+  activeDeadlineSeconds: 900  # 15 minute timeout
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: build
+          image: miget/migetpacks:latest
+          securityContext:
+            privileged: true  # Required for Docker-in-Docker
+          env:
+            - name: OUTPUT_IMAGE
+              value: registry.io/your-org/your-app:latest
+            - name: LANGUAGE
+              value: nodejs
+          volumeMounts:
+            - name: source
+              mountPath: /workspace/source
+              readOnly: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+      volumes:
+        - name: source
+          persistentVolumeClaim:
+            claimName: app-source  # PVC with your source code
+```
+
+<Note>
+The `privileged: true` security context is required because migetpacks uses Docker-in-Docker (DinD) internally to build images.
+</Note>
+
+## Build Cache with PVC
+
+Use a ReadWriteMany (RWX) PersistentVolumeClaim to share package manager caches across builds. This significantly speeds up dependency installation for repeated builds.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: build-cache
+  namespace: builds
+spec:
+  accessModes:
+    - ReadWriteMany  # RWX required for concurrent builds
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: your-rwx-storage-class  # e.g., nfs, cephfs, efs
+```
+
+Mount it in your Job:
+
+```yaml
+volumeMounts:
+  - name: build-cache
+    mountPath: /cache
+env:
+  - name: BUILD_CACHE_DIR
+    value: /cache
+volumes:
+  - name: build-cache
+    persistentVolumeClaim:
+      claimName: build-cache
+```
+
+The cache stores package manager artifacts per language:
+
+| Language | Cache Path | Contents |
+|----------|-----------|----------|
+| Node.js | `/cache/npm`, `/cache/yarn`, `/cache/pnpm` | Package tarballs |
+| Python | `/cache/pip`, `/cache/uv` | Wheel files |
+| Ruby | `/cache/bundler` | Gem files |
+| Go | `/cache/go` | Module sources |
+| Rust | `/cache/cargo` | Crate sources |
+| Java | `/cache/maven`, `/cache/gradle` | Dependencies |
+| PHP | `/cache/composer` | Composer packages |
+
+## ConfigMap for Environment Variables
+
+Use a ConfigMap to manage build configuration separately from the Job definition:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: build-config
+  namespace: builds
+data:
+  PORT: "3000"
+  USE_DHI: "true"
+  REGISTRY_MIRROR: "https://registry.example.io/mirror"
+  CACHE_MODE: "max"
+  NODE_OPTIONS: "--max-old-space-size=4096"
+```
+
+Reference it in your Job:
+
+```yaml
+containers:
+  - name: build
+    image: miget/migetpacks:latest
+    envFrom:
+      - configMapRef:
+          name: build-config
+    env:
+      - name: OUTPUT_IMAGE
+        value: registry.io/your-org/your-app:latest
+```
+
+## Secret for Registry Credentials
+
+Store registry credentials in a Kubernetes Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-credentials
+  namespace: builds
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: <base64-encoded-docker-config>
+```
+
+Mount it as a Docker config file:
+
+```yaml
+containers:
+  - name: build
+    image: miget/migetpacks:latest
+    env:
+      - name: DOCKER_CONFIG
+        value: /docker-config
+    volumeMounts:
+      - name: docker-config
+        mountPath: /docker-config
+volumes:
+  - name: docker-config
+    secret:
+      secretName: registry-credentials
+      items:
+        - key: .dockerconfigjson
+          path: config.json
+```
+
+## RESULT_FILE with Shared Volume
+
+Use an `emptyDir` volume to share build results between the builder and a post-build notification container:
+
+```yaml
+volumes:
+  - name: results
+    emptyDir: {}
+```
+
+Set the `RESULT_FILE` environment variable to write results to this volume:
+
+```yaml
+env:
+  - name: RESULT_FILE
+    value: /workspace/output/build-result.json
+volumeMounts:
+  - name: results
+    mountPath: /workspace/output
+```
+
+The builder always exits with code 0, writing the build status to the result file. Post-build containers should check the `status` field to determine success or failure.
+
+## Post-Build Notification
+
+Use an init container pattern or a sidecar to process build results. Here is an example using a second container that waits for the result file:
+
+```yaml
+containers:
+  - name: build
+    image: miget/migetpacks:latest
+    # ... build configuration ...
+
+  - name: notify
+    image: your-rabbitmq-publisher:latest
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        echo "Waiting for build result..."
+        while [ ! -f /workspace/output/build-result.json ]; do
+          sleep 2
+        done
+        echo "Build complete, publishing result..."
+        /app/publish-result /workspace/output/build-result.json
+    env:
+      - name: RABBITMQ_URL
+        valueFrom:
+          secretKeyRef:
+            name: rabbitmq-credentials
+            key: url
+      - name: RABBITMQ_QUEUE
+        value: build-results
+    volumeMounts:
+      - name: results
+        mountPath: /workspace/output
+```
+
+## Full Example
+
+A complete Job definition with all components -- source, cache, registry credentials, configuration, and post-build notification:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: build-my-app
+  namespace: builds
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: build
+          image: miget/migetpacks:latest
+          securityContext:
+            privileged: true
+          envFrom:
+            - configMapRef:
+                name: build-config
+          env:
+            - name: OUTPUT_IMAGE
+              value: registry.io/your-org/your-app:latest
+            - name: RESULT_FILE
+              value: /workspace/output/build-result.json
+            - name: BUILD_CACHE_DIR
+              value: /cache
+            - name: CACHE_IMAGE
+              value: registry.io/your-org/your-app:cache
+            - name: DOCKER_CONFIG
+              value: /docker-config
+          volumeMounts:
+            - name: source
+              mountPath: /workspace/source
+              readOnly: true
+            - name: build-cache
+              mountPath: /cache
+            - name: results
+              mountPath: /workspace/output
+            - name: docker-config
+              mountPath: /docker-config
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+        - name: notify
+          image: your-rabbitmq-publisher:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while [ ! -f /workspace/output/build-result.json ]; do sleep 2; done
+              /app/publish-result /workspace/output/build-result.json
+          env:
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: url
+          volumeMounts:
+            - name: results
+              mountPath: /workspace/output
+
+      volumes:
+        - name: source
+          persistentVolumeClaim:
+            claimName: app-source
+        - name: build-cache
+          persistentVolumeClaim:
+            claimName: build-cache
+        - name: results
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: registry-credentials
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+```
