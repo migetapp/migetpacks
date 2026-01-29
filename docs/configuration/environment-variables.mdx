@@ -19,6 +19,7 @@ These environment variables control how migetpacks builds your application.
 | `DOCKERFILE_PATH` | No | - | Custom Dockerfile path (relative to `PROJECT_PATH` or absolute) |
 | `COMPOSE_FILE` | No | - | Custom compose file path (auto-detects `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`) |
 | `BUILDPACKS` | No | auto-detected | Explicit buildpack order (e.g., `ruby,python,nodejs` - first is primary) |
+| `TAG_LATEST` | No | `false` | Also tag image with `:latest` in addition to primary tag |
 | `RESULT_FILE` | No | - | Path to write build results JSON (for Shipwright post-build steps) |
 | `STORAGE_DRIVER` | No | `overlay2` | Docker storage driver override (e.g., `fuse-overlayfs` for nested DinD) |
 

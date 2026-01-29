@@ -167,6 +167,7 @@ jobs:
 | `BUILDPACKS` | No | auto-detected | Explicit buildpack order (e.g., `ruby,nodejs`) |
 | `DOCKERFILE_PATH` | No | - | Custom Dockerfile path (forces `dockerfile` language) |
 | `COMPOSE_FILE` | No | - | Custom compose file path (forces `compose` language) |
+| `TAG_LATEST` | No | `false` | Also tag image with `:latest` in addition to primary tag |
 | `RESULT_FILE` | No | - | Path to write build results JSON |
 | `STORAGE_DRIVER` | No | `overlay2` | Docker storage driver (e.g., `fuse-overlayfs` for nested DinD) |
 

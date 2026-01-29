@@ -35,12 +35,30 @@ NO_CACHE=${NO_CACHE:-"false"}  # Force fresh build with --no-cache, skip cache-f
 CACHE_MODE=${CACHE_MODE:-"min"}  # BuildKit cache mode: "min" (default, smaller) or "max" (all layers)
 CACHE_FROM=${CACHE_FROM:-""}  # Additional read-only cache sources (comma-separated registry refs)
 BUILDPACKS=${BUILDPACKS:-""}  # Explicit buildpack order (e.g., "ruby,python,nodejs" - first is primary)
+TAG_LATEST=${TAG_LATEST:-"false"}  # Also tag with :latest when true
 
 # Filter for buildx output - suppress non-actionable warnings, indent output
 filter_buildx_output() {
   grep --line-buffered -v 'WARNING: current commit information was not captured by the build' \
     | grep --line-buffered -v 'warnings found (use docker --debug to expand)' \
     | sed -u 's/^/       /'
+}
+
+# Build the additional :latest tag flag if TAG_LATEST is enabled
+# Sets LATEST_TAG_FLAG to "-t image:latest" or empty string
+# Usage: build_latest_tag_flag "image:tag"
+#        docker buildx build ... -t "$image" $LATEST_TAG_FLAG ...
+build_latest_tag_flag() {
+  local image="$1"
+  LATEST_TAG_FLAG=""
+  if [ "$TAG_LATEST" = "true" ]; then
+    # Extract base image (everything before the last colon)
+    local base_image="${image%:*}"
+    # Only add :latest if image has a tag that isn't already "latest"
+    if [[ "$image" == *":"* ]] && [[ "$image" != *":latest" ]]; then
+      LATEST_TAG_FLAG="-t ${base_image}:latest"
+    fi
+  fi
 }
 
 # Auto-detect whether to push or load based on OUTPUT_IMAGE
@@ -82,7 +100,7 @@ KNOWN_BUILDER_VARS=(
   # Builder config
   "SOURCE_DIR" "OUTPUT_IMAGE" "LANGUAGE" "BUILD_COMMAND" "RUN_COMMAND" "PORT" "ARCH"
   "CACHE_IMAGE" "CACHE_REGISTRY_INSECURE" "MIX_ENV" "BUNDLE_WITHOUT" "PROJECT_PATH" "DOCKERFILE_PATH" "COMPOSE_FILE"
-  "RESULT_FILE" "CUSTOM_DATA" "USE_DHI" "DEBUG" "CACHE_KEY" "NO_CACHE" "CACHE_MODE" "CACHE_FROM" "BUILDPACKS" "PUSH_IMAGE"
+  "RESULT_FILE" "CUSTOM_DATA" "USE_DHI" "DEBUG" "CACHE_KEY" "NO_CACHE" "CACHE_MODE" "CACHE_FROM" "BUILDPACKS" "PUSH_IMAGE" "TAG_LATEST"
   "REGISTRY_MIRROR" "BUILDKIT_HOST" "BUILDPACK_DIR"
   # Go vars
   "GO_INSTALL_PACKAGE_SPEC" "GO_LINKER_SYMBOL" "GO_LINKER_VALUE" "GO_INSTALL_TOOLS_IN_IMAGE"
@@ -664,6 +682,9 @@ fi
 header "Migetpacks Build"
 info ""
 info "Output image: $OUTPUT_IMAGE"
+if [ "$TAG_LATEST" = "true" ]; then
+  info "Tag latest:   yes"
+fi
 info "Platform:     $DOCKER_PLATFORM"
 if [ -n "$CACHE_IMAGE" ]; then
   info "Cache:        $CACHE_IMAGE"
@@ -869,7 +890,8 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
 
   # Run build and show output directly (no buffering)
   BUILD_OUTPUT=$(mktemp)
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f Dockerfile -t "$OUTPUT_IMAGE" $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  build_latest_tag_flag "$OUTPUT_IMAGE"
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -986,9 +1008,10 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
 
     # Build the service (resolve context relative to source directory)
     FULL_BUILD_CONTEXT="$EFFECTIVE_SOURCE_DIR/$BUILD_CONTEXT"
+    build_latest_tag_flag "$SERVICE_IMAGE"
     if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS \
         -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
-        -t "$SERVICE_IMAGE" --push \
+        -t "$SERVICE_IMAGE" $LATEST_TAG_FLAG --push \
         "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
 
       # Pull image for port detection (buildx --push doesn't load locally)
@@ -2182,7 +2205,8 @@ if [ "$PUSH_IMAGE" = "false" ]; then
   BUILD_OUTPUT_FLAG="--load"
 fi
 
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+build_latest_tag_flag "$OUTPUT_IMAGE"
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
