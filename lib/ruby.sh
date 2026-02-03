@@ -223,7 +223,7 @@ EOF
   cat >> "$dockerfile" <<'EOF'
 # Copy rest of source code
 COPY . .
-RUN rm -rf .bundle/config
+RUN rm -rf .bundle/config bin/bundle
 EOF
 
   if [ "$has_rails_assets" = true ]; then
