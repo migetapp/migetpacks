@@ -37,11 +37,21 @@ CACHE_FROM=${CACHE_FROM:-""}  # Additional read-only cache sources (comma-separa
 BUILDPACKS=${BUILDPACKS:-""}  # Explicit buildpack order (e.g., "ruby,python,nodejs" - first is primary)
 TAG_LATEST=${TAG_LATEST:-"false"}  # Also tag with :latest when true
 
-# Filter for buildx output - suppress non-actionable warnings, indent output
+# Filter for buildx output - suppress non-actionable warnings, mask build var values, indent output
 filter_buildx_output() {
-  grep --line-buffered -v 'WARNING: current commit information was not captured by the build' \
-    | grep --line-buffered -v 'warnings found (use docker --debug to expand)' \
-    | sed -u 's/^/       /'
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *"WARNING: current commit information was not captured by the build"*) continue ;;
+      *"warnings found (use docker --debug to expand)"*) continue ;;
+    esac
+    for val in "${BUILD_VAR_VALUES[@]}"; do
+      if [ -n "$val" ]; then
+        line="${line//$val/[MASKED]}"
+      fi
+    done
+    printf '       %s\n' "$line"
+  done
 }
 
 # Build the additional :latest tag flag if TAG_LATEST is enabled
@@ -116,7 +126,7 @@ KNOWN_BUILDER_VARS=(
   # Docker/system vars
   "DOCKER_HOST" "DOCKER_PLATFORM" "DOCKER_BUILDKIT" "DOCKER_CONFIG" "STORAGE_DRIVER"
   # Internal vars
-  "BUILD_EXIT_CODE" "BUILD_ERROR_MESSAGE" "DETECTED_LANGUAGE" "CACHE_FLAGS"
+  "BUILD_EXIT_CODE" "BUILD_ERROR_MESSAGE" "DETECTED_LANGUAGE" "CACHE_FLAGS" "BUILD_VARS"
   # Shell/system vars (never pass through)
   "PATH" "HOME" "PWD" "OLDPWD" "SHLVL" "_" "HOSTNAME" "TERM" "SHELL" "USER" "LOGNAME"
   "LANG" "LC_ALL" "LC_CTYPE" "TZ" "EDITOR" "VISUAL" "PAGER" "LESS" "LS_COLORS"
@@ -161,6 +171,21 @@ inject_custom_env_vars() {
   fi
 }
 
+# Build --build-arg flags from BUILD_VARS JSON
+# Strips BUILD_VAR_ prefix from keys, collects values for masking
+build_arg_flags_from_build_vars() {
+  BUILD_ARGS=""
+  BUILD_VAR_VALUES=()
+  if [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
+    while IFS='=' read -r key value; do
+      [ -z "$key" ] && continue
+      local real_key="${key#BUILD_VAR_}"
+      BUILD_ARGS="$BUILD_ARGS --build-arg ${real_key}=${value}"
+      BUILD_VAR_VALUES+=("$value")
+    done < <(echo "$BUILD_VARS" | jq -r 'to_entries[] | .key + "=" + .value')
+  fi
+}
+
 # Set Docker platform based on architecture
 case "$ARCH" in
   x86_64|amd64)
@@ -173,6 +198,9 @@ case "$ARCH" in
     DOCKER_PLATFORM="linux/amd64"
     ;;
 esac
+
+# Parse BUILD_VARS JSON into --build-arg flags and collect values for masking
+build_arg_flags_from_build_vars
 
 # Build cache flags for BuildKit
 # NO_CACHE=true: force fresh build (--no-cache), skip cache-from, but still export to cache-to
@@ -888,10 +916,14 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
     BUILD_OUTPUT_FLAG="--load"
   fi
 
+  if [ -n "$BUILD_ARGS" ]; then
+    info "Build args: $(echo "$BUILD_VARS" | jq -r 'keys | map(sub("^BUILD_VAR_"; "")) | join(", ")')"
+  fi
+
   # Run build and show output directly (no buffering)
   BUILD_OUTPUT=$(mktemp)
   build_latest_tag_flag "$OUTPUT_IMAGE"
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -1666,8 +1698,14 @@ echo "FROM ${BUILD_IMAGE} AS builder" >> "$RUNTIME_DOCKERFILE"
 echo "" >> "$RUNTIME_DOCKERFILE"
 echo "WORKDIR /build" >> "$RUNTIME_DOCKERFILE"
 
-# Inject custom environment variables (any env var not in KNOWN_BUILDER_VARS)
-inject_custom_env_vars "$RUNTIME_DOCKERFILE"
+# Declare ARGs for build-time variables (so --build-arg values are available)
+if [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
+  echo "" >> "$RUNTIME_DOCKERFILE"
+  echo "# Build-time variables" >> "$RUNTIME_DOCKERFILE"
+  echo "$BUILD_VARS" | jq -r 'keys[]' | while read -r key; do
+    echo "ARG ${key#BUILD_VAR_}" >> "$RUNTIME_DOCKERFILE"
+  done
+fi
 
 # Copy additional runtimes into primary builder (shared environment)
 # All runtimes are available in the same build environment
@@ -2205,8 +2243,12 @@ if [ "$PUSH_IMAGE" = "false" ]; then
   BUILD_OUTPUT_FLAG="--load"
 fi
 
+if [ -n "$BUILD_ARGS" ]; then
+  info "Build args: $(echo "$BUILD_VARS" | jq -r 'keys | map(sub("^BUILD_VAR_"; "")) | join(", ")')"
+fi
+
 build_latest_tag_flag "$OUTPUT_IMAGE"
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
