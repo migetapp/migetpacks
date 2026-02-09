@@ -147,8 +147,8 @@ detect_dotnet() {
   if [ -f "$BUILD_DIR/global.json" ] || [ -n "$(find "$BUILD_DIR" -maxdepth 1 -name '*.sln' -o -name '*.slnx' 2>/dev/null)" ]; then
     return 0
   fi
-  # Check for project files up to 2 levels deep
-  if [ -n "$(find "$BUILD_DIR" -maxdepth 2 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null)" ]; then
+  # Check for project files up to 3 levels deep (e.g. src/ProjectName/Project.csproj)
+  if [ -n "$(find "$BUILD_DIR" -maxdepth 3 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null)" ]; then
     return 0
   fi
   return 1

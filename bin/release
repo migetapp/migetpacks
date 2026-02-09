@@ -217,8 +217,9 @@ case "$LANG_NORMALIZED" in
     # Detect main project from *.csproj files
     # Priority: single project, or project with Sdk="Microsoft.NET.Sdk.Web"
     DOTNET_PROJECT=""
-    CSPROJ_FILES=$(find "$BUILD_DIR" -maxdepth 2 -name "*.csproj" 2>/dev/null)
-    CSPROJ_COUNT=$(echo "$CSPROJ_FILES" | grep -c "\.csproj$" 2>/dev/null || echo "0")
+    CSPROJ_FILES=$(find "$BUILD_DIR" -maxdepth 3 -name "*.csproj" 2>/dev/null)
+    CSPROJ_COUNT=$(echo "$CSPROJ_FILES" | grep -c "\.csproj$" 2>/dev/null || true)
+    [ -z "$CSPROJ_COUNT" ] && CSPROJ_COUNT=0
 
     if [ "$CSPROJ_COUNT" -eq 1 ]; then
       DOTNET_PROJECT=$(basename "$CSPROJ_FILES" .csproj)

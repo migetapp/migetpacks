@@ -397,11 +397,11 @@ detect_dotnet_version() {
     fi
   fi
 
-  # Check project files for TargetFramework
-  local proj_file=$(find "$BUILD_DIR" -maxdepth 2 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null | head -1)
+  # Check project files for TargetFramework or TargetFrameworks
+  local proj_file=$(find "$BUILD_DIR" -maxdepth 3 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null | head -1)
   if [ -n "$proj_file" ]; then
-    version=$(grep -E "<TargetFramework>" "$proj_file" | \
-      sed -E 's/.*<TargetFramework>net([0-9.]+)<.*/\1/' | \
+    version=$(grep -E "<TargetFrameworks?>" "$proj_file" | \
+      sed -E 's/.*<TargetFrameworks?>net([0-9.]+).*/\1/' | \
       tr -d '[:space:]')
 
     if [ -n "$version" ]; then

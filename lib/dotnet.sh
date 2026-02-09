@@ -52,15 +52,18 @@ RUN ${mount_prefix}if [ -f .config/dotnet-tools.json ]; then dotnet tool restore
 EOF
   else
     # Publish to bin/publish/ relative to each project
-    # Clean up: remove source files and intermediate artifacts, keep only bin/publish/
+    # Build must succeed (separate RUN); cleanup can fail gracefully
     cat >> "$dockerfile" <<EOF
 RUN ${mount_prefix}if [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi \\
     && dotnet restore \\
     && dotnet publish --configuration Release --no-restore -p:PublishDir=bin/publish \\
-    && find . -path "*/bin/publish/*" -type f ! -name "*.dll" ! -name "*.json" ! -name "*.pdb" -exec chmod +x {} \\; \\
-    && rm -rf */obj */*/obj */*/*/obj 2>/dev/null; rm -rf */bin/Release/net* */bin/Debug 2>/dev/null; \\
-       find . -maxdepth 3 -type f \\( -name "*.cs" -o -name "*.fs" -o -name "*.vb" -o -name "*.csproj" -o -name "*.fsproj" -o -name "*.vbproj" -o -name "*.sln" -o -name "*.slnx" \\) -delete 2>/dev/null; \\
-       rm -rf .git .github .config/dotnet-tools.json 2>/dev/null; true
+    && find . -path "*/bin/publish/*" -type f ! -name "*.dll" ! -name "*.json" ! -name "*.pdb" -exec chmod +x {} \\;
+
+# Clean up source files and intermediate artifacts, keep only bin/publish/
+RUN rm -rf */obj */*/obj */*/*/obj 2>/dev/null; \\
+    rm -rf */bin/Release/net* */bin/Debug 2>/dev/null; \\
+    find . -maxdepth 3 -type f \\( -name "*.cs" -o -name "*.fs" -o -name "*.vb" -o -name "*.csproj" -o -name "*.fsproj" -o -name "*.vbproj" -o -name "*.sln" -o -name "*.slnx" \\) -delete 2>/dev/null; \\
+    rm -rf .git .github .config/dotnet-tools.json 2>/dev/null; true
 EOF
   fi
 }
