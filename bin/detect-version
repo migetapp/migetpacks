@@ -397,17 +397,33 @@ detect_dotnet_version() {
     fi
   fi
 
-  # Check project files for TargetFramework or TargetFrameworks
-  local proj_file=$(find "$BUILD_DIR" -maxdepth 3 -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' 2>/dev/null | head -1)
-  if [ -n "$proj_file" ]; then
-    version=$(grep -E "<TargetFrameworks?>" "$proj_file" | \
-      sed -E 's/.*<TargetFrameworks?>net([0-9.]+).*/\1/' | \
+  # Check ALL project files for TargetFramework/TargetFrameworks, pick highest version
+  # This ensures the SDK supports all target frameworks in the solution
+  local highest_version=""
+  while IFS= read -r proj_file; do
+    [ -z "$proj_file" ] && continue
+    local ver=$(grep -E "<TargetFrameworks?>" "$proj_file" 2>/dev/null | \
+      sed -E 's/.*<TargetFrameworks?>([^<]+).*/\1/' | \
       tr -d '[:space:]')
+    # Handle multi-target: net8.0;net9.0 -> extract all, pick highest
+    local IFS_BAK="$IFS"
+    IFS=';'
+    for tf in $ver; do
+      local v=$(echo "$tf" | sed -E 's/^net([0-9.]+).*/\1/')
+      if [ -n "$v" ] && [ "$v" != "$tf" ]; then
+        if [ -z "$highest_version" ]; then
+          highest_version="$v"
+        elif printf '%s\n%s\n' "$highest_version" "$v" | sort -t. -k1,1n -k2,2n | tail -1 | grep -q "^${v}$"; then
+          highest_version="$v"
+        fi
+      fi
+    done
+    IFS="$IFS_BAK"
+  done <<< "$(find "$BUILD_DIR" -maxdepth 3 \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) 2>/dev/null)"
 
-    if [ -n "$version" ]; then
-      echo "$version"
-      return 0
-    fi
+  if [ -n "$highest_version" ]; then
+    echo "$highest_version"
+    return 0
   fi
 
   # Default version if nothing specified
