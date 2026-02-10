@@ -1707,6 +1707,9 @@ if [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
   done
 fi
 
+# Inject custom environment variables (any env var not in KNOWN_BUILDER_VARS)
+inject_custom_env_vars "$RUNTIME_DOCKERFILE"
+
 # Copy additional runtimes into primary builder (shared environment)
 # All runtimes are available in the same build environment
 if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ]; then
