@@ -143,8 +143,10 @@ buildpack_generate_deps() {
         install_cmd="npm install -g yarn && yarn install --frozen-lockfile"
       fi
 
+      local node_options="${NODE_OPTIONS:---max_old_space_size=2560}"
       cat >> "$dockerfile" <<EOF
-# Node.js: copy lockfiles first for layer caching
+# Node.js: environment and lockfiles for layer caching
+ENV NODE_OPTIONS="${node_options}"
 COPY package.json ${lockfile} ./
 EOF
       if [ "$USE_CACHE_MOUNTS" = "true" ]; then
