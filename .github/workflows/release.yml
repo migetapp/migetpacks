@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Version override (e.g. 0.1.0 for minor bump). Leave empty to auto-increment patch.'
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip commits made by this workflow
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version
+        id: version
+        run: |
+          CURRENT=$(grep '^IMAGE_TAG' Makefile | sed 's/IMAGE_TAG ?= //')
+          echo "current=$CURRENT"
+
+          if [ -n "${{ inputs.version_override }}" ]; then
+            VERSION="${{ inputs.version_override }}"
+          else
+            # Auto-increment patch
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $VERSION"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push main image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            miget/migetpacks:${{ steps.version.outputs.version }}
+            miget/migetpacks:latest
+
+      - name: Build and push alpine image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.alpine
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            miget/migetpacks:${{ steps.version.outputs.version }}-alpine
+            miget/migetpacks:latest-alpine
+
+      - name: Bump version in Makefile
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          sed -i "s/^IMAGE_TAG ?= .*/IMAGE_TAG ?= ${NEXT}/" Makefile
+          echo "Bumped Makefile to $NEXT"
+
+      - name: Commit and tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Makefile
+          git commit -m "Bump version to $(grep '^IMAGE_TAG' Makefile | sed 's/IMAGE_TAG ?= //') [skip ci]"
+          git tag "v${VERSION}"
+          git push origin main --tags
