@@ -483,6 +483,7 @@ APP_JSON_ENV="{}"
 APP_JSON_FORMATION="{}"
 APP_JSON_SCRIPTS="{}"
 APP_JSON_BUILDPACKS="[]"
+APP_JSON_ADDONS="[]"
 
 # Map buildpack names to language identifiers
 map_buildpack_name() {
@@ -511,7 +512,7 @@ map_buildpack_name() {
 }
 
 # Parse app.json and extract relevant fields
-# Sets: APP_JSON_ENV, APP_JSON_FORMATION, APP_JSON_SCRIPTS, APP_JSON_BUILDPACKS
+# Sets: APP_JSON_ENV, APP_JSON_FORMATION, APP_JSON_SCRIPTS, APP_JSON_BUILDPACKS, APP_JSON_ADDONS
 parse_app_json() {
   local app_json=$1
 
@@ -570,6 +571,18 @@ parse_app_json() {
   # Format: [{"url": "heroku/ruby"}]
   APP_JSON_BUILDPACKS=$(jq -c '
     .buildpacks // [] | map(.url // .)
+  ' "$app_json" 2>/dev/null || echo "[]")
+
+  # Extract addons
+  # Supports both string ("heroku-postgresql:hobby-dev") and object ({"plan": "...", "as": "...", "options": {...}}) formats
+  APP_JSON_ADDONS=$(jq -c '
+    .addons // [] | map(
+      if type == "string" then
+        {plan: ., as: null, options: null}
+      else
+        {plan: (.plan // .), as: (.as // null), options: (.options // null)}
+      end
+    )
   ' "$app_json" 2>/dev/null || echo "[]")
 }
 
@@ -687,6 +700,11 @@ write_result_file() {
     result_json=$(echo "$result_json" | jq --argjson scripts "$APP_JSON_SCRIPTS" '. + {scripts: $scripts}')
   fi
 
+  # Add app.json addons if available
+  if [ "$APP_JSON_ADDONS" != "[]" ]; then
+    result_json=$(echo "$result_json" | jq --argjson addons "$APP_JSON_ADDONS" '. + {addons: $addons}')
+  fi
+
   # Merge custom data if provided
   if [ -n "$CUSTOM_DATA" ]; then
     result_json=$(echo "$result_json" | jq --argjson custom "$CUSTOM_DATA" '. + {custom: $custom}')
@@ -801,6 +819,10 @@ if [ -f "$EFFECTIVE_SOURCE_DIR/app.json" ]; then
   if [ "$APP_JSON_SCRIPTS" != "[]" ]; then
     script_names=$(echo "$APP_JSON_SCRIPTS" | jq -r '.[].name' | tr '\n' ', ' | sed 's/,$//')
     info "app.json: scripts ($script_names)"
+  fi
+  if [ "$APP_JSON_ADDONS" != "[]" ]; then
+    addon_names=$(echo "$APP_JSON_ADDONS" | jq -r '.[].plan' | tr '\n' ', ' | sed 's/,$//')
+    info "app.json: addons ($addon_names)"
   fi
 
   # Use buildpacks from app.json to determine language if not set

@@ -23,6 +23,7 @@ The builder always exits with code 0 to ensure post-build steps (like Shipwright
 | `env` | object | Environment variables from app.json |
 | `formation` | array | Process formation from app.json |
 | `scripts` | array | Deployment scripts from app.json |
+| `addons` | array | Service dependencies from app.json |
 | `build_time` | number | Build duration in seconds |
 | `language` | string | Detected or specified language |
 | `timestamp` | string | ISO 8601 build completion time |
@@ -117,6 +118,24 @@ Deployment scripts from `app.json`:
 }
 ```
 
+### addons
+
+Service dependencies from `app.json`:
+
+```json
+{
+  "addons": [
+    {"plan": "heroku-postgresql:hobby-dev", "as": null, "options": null},
+    {"plan": "heroku-redis:premium-0", "as": "CACHE", "options": null},
+    {"plan": "mongolab:shared-single-small", "as": "MONGO", "options": {"version": "5.0"}}
+  ]
+}
+```
+
+- `plan` -- the addon plan identifier
+- `as` -- attachment alias (overrides config var prefix), or `null`
+- `options` -- provider-specific options object, or `null`
+
 ### _shell
 
 Indicates whether the runtime container has a shell available:
@@ -164,6 +183,9 @@ A complete result file for a successful Ruby build:
   ],
   "scripts": [
     {"name": "postdeploy", "command": "bundle exec rails db:migrate"}
+  ],
+  "addons": [
+    {"plan": "heroku-postgresql:hobby-dev", "as": null, "options": null}
   ],
   "build_time": 45,
   "language": "ruby",

@@ -13,6 +13,7 @@ migetpacks supports `app.json` as an application manifest file. This file define
 | `formation` | Process configuration with replicas and sizing |
 | `scripts` | Deployment lifecycle scripts |
 | `buildpacks` | Buildpack (language) ordering |
+| `addons` | Service dependencies (databases, caches, etc.) |
 
 ## Environment Variables
 
@@ -127,6 +128,53 @@ When multiple buildpacks are specified, the order defines the build sequence. Th
   The `buildpacks` field in `app.json` is equivalent to setting the `BUILDPACKS` environment variable. If both are provided, the `BUILDPACKS` env var takes precedence.
 </Note>
 
+## Addons
+
+The `addons` field declares service dependencies for your application. Each addon can be specified as a simple string or as an object with additional configuration.
+
+### String Format
+
+```json
+{
+  "addons": [
+    "heroku-postgresql:hobby-dev",
+    "heroku-redis:premium-0"
+  ]
+}
+```
+
+### Object Format
+
+```json
+{
+  "addons": [
+    {
+      "plan": "heroku-postgresql:standard-0",
+      "as": "PRIMARY_DB"
+    },
+    {
+      "plan": "mongolab:shared-single-small",
+      "as": "MONGO",
+      "options": {
+        "version": "5.0"
+      }
+    }
+  ]
+}
+```
+
+### Addon Properties
+
+| Property | Description |
+|----------|-------------|
+| `plan` | The addon plan identifier (e.g., `heroku-postgresql:hobby-dev`) |
+| `as` | Attachment alias — overrides the default config var prefix |
+| `options` | Provider-specific configuration options |
+
+<Note>
+  String-format addons are normalized to object format in the result JSON with `as` and `options` set to `null`.
+</Note>
+
 ## Full Example
 
 ```json
@@ -165,6 +213,13 @@ When multiple buildpacks are specified, the order defines the build sequence. Th
   "buildpacks": [
     {"url": "heroku/nodejs"},
     {"url": "heroku/ruby"}
+  ],
+  "addons": [
+    "heroku-postgresql:hobby-dev",
+    {
+      "plan": "heroku-redis:premium-0",
+      "as": "CACHE"
+    }
   ]
 }
 ```
@@ -199,6 +254,10 @@ Values defined in `app.json` appear in the [build result JSON](/reference/result
   ],
   "scripts": [
     {"name": "postdeploy", "command": "bundle exec rails db:migrate"}
+  ],
+  "addons": [
+    {"plan": "heroku-postgresql:hobby-dev", "as": null, "options": null},
+    {"plan": "heroku-redis:premium-0", "as": "CACHE", "options": null}
   ],
   "language": "ruby",
   "timestamp": "2025-12-18T20:00:00Z"
