@@ -113,36 +113,61 @@ case "$LANG_NORMALIZED" in
       fi
     fi
 
+    # Auto-detect ASGI/WSGI app by scanning Python source for framework instantiation
+    DETECTED_APP=""
+    if [ -z "$DJANGO_PROJECT" ]; then
+      APP_MATCH=$(grep -rn --include="*.py" \
+        --exclude-dir=".venv" --exclude-dir="venv" --exclude-dir="env" \
+        --exclude-dir="node_modules" --exclude-dir="__pycache__" \
+        --exclude-dir=".git" --exclude-dir="tests" --exclude-dir="test" \
+        -E '^\s*(\w+)\s*=\s*(FastAPI|Starlette|Litestar|Sanic|Flask|Falcon|Bottle)\s*\(' \
+        "$BUILD_DIR" 2>/dev/null | head -1)
+      if [ -n "$APP_MATCH" ]; then
+        APP_FILE=$(echo "$APP_MATCH" | cut -d: -f1)
+        APP_VAR=$(echo "$APP_MATCH" | cut -d: -f3- | sed -E 's/^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=.*/\1/')
+        APP_REL="${APP_FILE#$BUILD_DIR/}"
+        if [[ "$APP_REL" == *"/__init__.py" ]]; then
+          DETECTED_APP="$(dirname "$APP_REL" | tr '/' '.'):${APP_VAR}"
+        else
+          DETECTED_APP="$(echo "$APP_REL" | sed 's/\.py$//' | tr '/' '.'):${APP_VAR}"
+        fi
+      fi
+    fi
+
     # Detect WSGI/ASGI app and set appropriate command
     if [ -n "$DJANGO_PROJECT" ] && [ "$HAS_GUNICORN" = true ]; then
       # Django with gunicorn
-      DEFAULT_WEB_PROCESS="gunicorn ${DJANGO_PROJECT}.wsgi:application --bind 0.0.0.0:\$PORT"
+      DEFAULT_WEB_PROCESS="gunicorn ${DJANGO_PROJECT}.wsgi:application --bind [::]:\$PORT"
     elif [ -n "$DJANGO_PROJECT" ] && [ "$HAS_UVICORN" = true ]; then
       # Django with uvicorn (ASGI)
-      DEFAULT_WEB_PROCESS="uvicorn ${DJANGO_PROJECT}.asgi:application --host 0.0.0.0 --port \$PORT"
+      DEFAULT_WEB_PROCESS="uvicorn ${DJANGO_PROJECT}.asgi:application --host :: --port \$PORT"
     elif [ "$HAS_GUNICORN" = true ]; then
-      if [ -f "$BUILD_DIR/wsgi.py" ]; then
-        DEFAULT_WEB_PROCESS="gunicorn wsgi:application --bind 0.0.0.0:\$PORT"
+      if [ -n "$DETECTED_APP" ]; then
+        DEFAULT_WEB_PROCESS="gunicorn ${DETECTED_APP} --bind [::]:\$PORT"
+      elif [ -f "$BUILD_DIR/wsgi.py" ]; then
+        DEFAULT_WEB_PROCESS="gunicorn wsgi:application --bind [::]:\$PORT"
       elif [ -f "$BUILD_DIR/app.py" ]; then
-        DEFAULT_WEB_PROCESS="gunicorn app:app --bind 0.0.0.0:\$PORT"
+        DEFAULT_WEB_PROCESS="gunicorn app:app --bind [::]:\$PORT"
       elif [ -f "$BUILD_DIR/main.py" ]; then
-        DEFAULT_WEB_PROCESS="gunicorn main:app --bind 0.0.0.0:\$PORT"
+        DEFAULT_WEB_PROCESS="gunicorn main:app --bind [::]:\$PORT"
       elif [ -f "$BUILD_DIR/application.py" ]; then
-        DEFAULT_WEB_PROCESS="gunicorn application:application --bind 0.0.0.0:\$PORT"
+        DEFAULT_WEB_PROCESS="gunicorn application:application --bind [::]:\$PORT"
       else
-        DEFAULT_WEB_PROCESS="gunicorn app:app --bind 0.0.0.0:\$PORT"
+        DEFAULT_WEB_PROCESS="gunicorn app:app --bind [::]:\$PORT"
       fi
     elif [ "$HAS_UVICORN" = true ]; then
-      if [ -f "$BUILD_DIR/main.py" ]; then
-        DEFAULT_WEB_PROCESS="uvicorn main:app --host 0.0.0.0 --port \$PORT"
+      if [ -n "$DETECTED_APP" ]; then
+        DEFAULT_WEB_PROCESS="uvicorn ${DETECTED_APP} --host :: --port \$PORT"
+      elif [ -f "$BUILD_DIR/main.py" ]; then
+        DEFAULT_WEB_PROCESS="uvicorn main:app --host :: --port \$PORT"
       elif [ -f "$BUILD_DIR/app.py" ]; then
-        DEFAULT_WEB_PROCESS="uvicorn app:app --host 0.0.0.0 --port \$PORT"
+        DEFAULT_WEB_PROCESS="uvicorn app:app --host :: --port \$PORT"
       else
-        DEFAULT_WEB_PROCESS="uvicorn main:app --host 0.0.0.0 --port \$PORT"
+        DEFAULT_WEB_PROCESS="uvicorn main:app --host :: --port \$PORT"
       fi
     elif [ -f "$BUILD_DIR/manage.py" ]; then
       # Django without gunicorn - use runserver (not recommended for production)
-      DEFAULT_WEB_PROCESS="python manage.py runserver 0.0.0.0:\$PORT"
+      DEFAULT_WEB_PROCESS="python manage.py runserver [::]:\$PORT"
     elif [ -f "$BUILD_DIR/app.py" ]; then
       DEFAULT_WEB_PROCESS="python app.py"
     else
