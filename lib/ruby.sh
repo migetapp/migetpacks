@@ -181,6 +181,11 @@ EOF
   if [ ! -f "$build_dir/Gemfile.lock" ]; then
     gemfile_copy="COPY Gemfile ./"
   fi
+  # Include .ruby-version if it exists (Gemfile may reference it via `ruby file: ".ruby-version"`)
+  if [ -f "$build_dir/.ruby-version" ]; then
+    gemfile_copy="${gemfile_copy}
+COPY .ruby-version ./"
+  fi
 
   cat >> "$dockerfile" <<EOF
 # Copy Gemfile first for layer caching (bundle install cached if Gemfile unchanged)
