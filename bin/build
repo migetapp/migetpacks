@@ -859,6 +859,19 @@ if [ -n "$BUILDPACKS" ]; then
     warning "DHI multi-buildpack: additional buildpacks available at BUILD TIME only"
     warning "Runtime image will only contain ${LANGUAGE} (distroless images are single-runtime)"
   fi
+elif [ "$APP_JSON_BUILDPACKS" != "[]" ]; then
+  # Use buildpack order from app.json (last is primary, rest are additional in order)
+  bp_count=$(echo "$APP_JSON_BUILDPACKS" | jq 'length')
+  for (( i=0; i<bp_count-1; i++ )); do
+    bp=$(echo "$APP_JSON_BUILDPACKS" | jq -r ".[$i]")
+    mapped=$(map_buildpack_name "$bp")
+    if [ -n "$mapped" ] && [ "$mapped" != "$LANGUAGE" ]; then
+      ADDITIONAL_BUILDPACKS+=("$mapped")
+    fi
+  done
+  if [ ${#ADDITIONAL_BUILDPACKS[@]} -gt 0 ]; then
+    info "app.json: additional buildpacks: ${ADDITIONAL_BUILDPACKS[*]}"
+  fi
 fi
 
 # Detect language if not specified
@@ -1799,8 +1812,8 @@ case "$LANG_NORMALIZED" in
 esac
 
 # Run builds for additional buildpacks (runtimes already copied above)
-# These run AFTER primary language build, with all runtimes available
-if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ]; then
+# Ruby handles this internally (before assets:precompile) to match Heroku buildpack order
+if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ] && [ "$LANG_NORMALIZED" != "ruby" ]; then
   echo "" >> "$RUNTIME_DOCKERFILE"
   echo "# Build additional buildpacks (all runtimes available)" >> "$RUNTIME_DOCKERFILE"
 

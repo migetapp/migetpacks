@@ -74,12 +74,14 @@ nodejs_generate_builder() {
 
   # Node.js-optimized layer caching: copy lockfiles first, npm install, then copy rest
   # This ensures npm install layer is cached when only source code changes (not package.json)
-  cat >> "$dockerfile" <<'EOF'
+  local node_options="${NODE_OPTIONS:---max_old_space_size=2560}"
+  cat >> "$dockerfile" <<EOF
 # Copy package files first for layer caching (npm install cached if lockfiles unchanged)
 COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
 ENV NODE_ENV=production
 ENV NPM_CONFIG_LOGLEVEL=error
 ENV NODE_VERBOSE=false
+ENV NODE_OPTIONS="${node_options}"
 EOF
 
   if [ -n "$s3_cache_bucket" ] && [ -n "$cache_key" ]; then
@@ -142,7 +144,8 @@ RUN ${build_command} \\
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
-RUN if grep -q "\"build\"" package.json; then npm run build; fi \
+RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run heroku-postbuild; \
+    elif grep -q '"build"' package.json 2>/dev/null; then npm run build; fi \
     && if [ -f package-lock.json ]; then npm prune --production; \
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \
@@ -183,7 +186,8 @@ RUN ${build_command} \\
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
-RUN if grep -q "\"build\"" package.json; then npm run build; fi \
+RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run heroku-postbuild; \
+    elif grep -q '"build"' package.json 2>/dev/null; then npm run build; fi \
     && if [ -f package-lock.json ]; then npm prune --production; \
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \
@@ -212,7 +216,8 @@ RUN ${build_command} \\
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
-RUN if grep -q "\"build\"" package.json; then npm run build; fi \
+RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run heroku-postbuild; \
+    elif grep -q '"build"' package.json 2>/dev/null; then npm run build; fi \
     && if [ -f package-lock.json ]; then npm prune --production; \
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \

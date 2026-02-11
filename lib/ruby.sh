@@ -152,7 +152,13 @@ EOF
   # Check if this is a Rails app with assets
   local has_rails_assets=false
   if ruby_has_rails_assets "$build_dir"; then
-    has_rails_assets=true
+    # Skip if sprockets manifest already exists (assets were precompiled locally)
+    if ls "$build_dir"/public/assets/.sprockets-manifest-*.json 1>/dev/null 2>&1 || \
+       ls "$build_dir"/public/assets/manifest-*.json 1>/dev/null 2>&1; then
+      info "Sprockets manifest found, skipping assets:precompile"
+    else
+      has_rails_assets=true
+    fi
   fi
 
   # Note: Node.js runtime is already copied by buildpack_copy_runtime in bin/build
@@ -180,6 +186,11 @@ EOF
   local gemfile_copy="COPY Gemfile Gemfile.lock ./"
   if [ ! -f "$build_dir/Gemfile.lock" ]; then
     gemfile_copy="COPY Gemfile ./"
+  fi
+  # Include .ruby-version if it exists (Gemfile may reference it via `ruby file: ".ruby-version"`)
+  if [ -f "$build_dir/.ruby-version" ]; then
+    gemfile_copy="${gemfile_copy}
+COPY .ruby-version ./"
   fi
 
   cat >> "$dockerfile" <<EOF
@@ -226,15 +237,36 @@ COPY . .
 RUN rm -rf .bundle/config bin/bundle
 EOF
 
+  # Run additional buildpack builds BEFORE assets:precompile (matches Heroku buildpack order)
+  # e.g. Node.js heroku-postbuild may set up config needed by Rails asset pipeline
+  if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ]; then
+    for bp_lang in "${ADDITIONAL_LANGS[@]}"; do
+      if [ "$bp_lang" != "$LANG_NORMALIZED" ]; then
+        buildpack_generate_build "$dockerfile" "$bp_lang" "$build_dir"
+      fi
+    done
+  fi
+
+  # Use app's RAILS_ENV if set (e.g. from app.json), default to production
+  local rails_env="${RAILS_ENV:-production}"
+
+  # Generate dummy DATABASE_URL based on detected DB adapter (matches Heroku behavior)
+  local dummy_db_url="postgres://user:pass@127.0.0.1/dummy"
+  if [ "$RUBY_NEEDS_MYSQL" = true ]; then
+    dummy_db_url="mysql2://user:pass@127.0.0.1/dummy"
+  elif [ "$RUBY_NEEDS_SQLITE" = true ]; then
+    dummy_db_url="sqlite3:///tmp/dummy.sqlite3"
+  fi
+
   if [ "$has_rails_assets" = true ]; then
     # Rails app with assets - precompile them, then cleanup
     if [ -n "$build_command" ]; then
       cat >> "$dockerfile" <<EOF
-ENV RAILS_ENV=production
+ENV RAILS_ENV=${rails_env}
 ENV RAILS_GROUPS=assets
 ENV SECRET_KEY_BASE=${build_secret_key_base}
 ENV SECRET_KEY_BASE_DUMMY=1
-ENV DATABASE_URL=postgres://user:pass@127.0.0.1/dummy
+ENV DATABASE_URL=${dummy_db_url}
 RUN ${build_command} && \\
     bundle exec rake assets:precompile && \\
     bundle exec rake assets:clean && \\
@@ -242,11 +274,11 @@ RUN ${build_command} && \\
 EOF
     else
       cat >> "$dockerfile" <<EOF
-ENV RAILS_ENV=production
+ENV RAILS_ENV=${rails_env}
 ENV RAILS_GROUPS=assets
 ENV SECRET_KEY_BASE=${build_secret_key_base}
 ENV SECRET_KEY_BASE_DUMMY=1
-ENV DATABASE_URL=postgres://user:pass@127.0.0.1/dummy
+ENV DATABASE_URL=${dummy_db_url}
 RUN bundle exec rake assets:precompile && \\
     bundle exec rake assets:clean && \\
     rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null; true

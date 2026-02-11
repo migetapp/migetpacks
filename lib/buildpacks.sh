@@ -143,8 +143,10 @@ buildpack_generate_deps() {
         install_cmd="npm install -g yarn && yarn install --frozen-lockfile"
       fi
 
+      local node_options="${NODE_OPTIONS:---max_old_space_size=2560}"
       cat >> "$dockerfile" <<EOF
-# Node.js: copy lockfiles first for layer caching
+# Node.js: environment and lockfiles for layer caching
+ENV NODE_OPTIONS="${node_options}"
 COPY package.json ${lockfile} ./
 EOF
       if [ "$USE_CACHE_MOUNTS" = "true" ]; then
@@ -173,10 +175,12 @@ buildpack_generate_build() {
   case "$lang" in
     nodejs|node)
       # Only run build step - dependencies already installed by buildpack_generate_deps
+      # Prefer heroku-postbuild over build (matches Heroku behavior)
       cat >> "$dockerfile" <<'EOF'
 # Build: Node.js assets
 RUN if [ -f package.json ]; then \
-      if grep -q '"build:prod"' package.json 2>/dev/null; then npm run build:prod; \
+      if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run heroku-postbuild; \
+      elif grep -q '"build:prod"' package.json 2>/dev/null; then npm run build:prod; \
       elif grep -q '"build:production"' package.json 2>/dev/null; then npm run build:production; \
       elif grep -q '"build"' package.json 2>/dev/null; then npm run build; fi \
     fi
