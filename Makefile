@@ -1,9 +1,9 @@
-.PHONY: help build build-alpine push push-alpine test test-nodejs test-python test-go test-rust clean install
+.PHONY: help build build-alpine push push-alpine test test-detect test-nodejs test-python test-go test-rust test-dotnet clean install
 
 # Variables
 REGISTRY ?= miget
 IMAGE_NAME ?= migetpacks
-IMAGE_TAG ?= 0.0.213
+IMAGE_TAG ?= 0.0.217
 PLATFORMS ?= linux/amd64,linux/arm64
 FULL_IMAGE = $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 
@@ -19,6 +19,7 @@ help:
 	@echo "  make test-python          - Test Python example build"
 	@echo "  make test-go              - Test Go example build"
 	@echo "  make test-rust            - Test Rust example build"
+	@echo "  make test-dotnet          - Test .NET example build"
 	@echo "  make clean                - Remove build artifacts"
 	@echo "  make install              - Install to Kubernetes (Shipwright)"
 	@echo ""
@@ -87,6 +88,15 @@ test-rust:
 		-e OUTPUT_IMAGE=test-rust:latest \
 		$(FULL_IMAGE)
 
+test-dotnet:
+	@echo "Testing .NET build..."
+	docker run --rm \
+		-v $(PWD)/examples/dotnet-hello-world:/workspace/source:ro \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-e SOURCE_DIR=/workspace/source \
+		-e OUTPUT_IMAGE=test-dotnet:latest \
+		$(FULL_IMAGE)
+
 test: test-detect
 	@echo "All tests passed ✓"
 
@@ -97,6 +107,7 @@ clean:
 	docker rmi test-python:latest 2>/dev/null || true
 	docker rmi test-go:latest 2>/dev/null || true
 	docker rmi test-rust:latest 2>/dev/null || true
+	docker rmi test-dotnet:latest 2>/dev/null || true
 	@echo "✓ Clean complete"
 
 install:
