@@ -174,15 +174,17 @@ inject_custom_env_vars() {
 # Build --build-arg flags from BUILD_VARS JSON
 # Strips BUILD_VAR_ prefix from keys, collects values for masking
 build_arg_flags_from_build_vars() {
-  BUILD_ARGS=""
+  BUILD_ARGS=()
   BUILD_VAR_VALUES=()
   if [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
-    while IFS='=' read -r key value; do
-      [ -z "$key" ] && continue
+    while IFS= read -r -d '' entry; do
+      [ -z "$entry" ] && continue
+      local key="${entry%%=*}"
+      local value="${entry#*=}"
       local real_key="${key#BUILD_VAR_}"
-      BUILD_ARGS="$BUILD_ARGS --build-arg ${real_key}=${value}"
+      BUILD_ARGS+=(--build-arg "${real_key}=${value}")
       BUILD_VAR_VALUES+=("$value")
-    done < <(echo "$BUILD_VARS" | jq -r 'to_entries[] | .key + "=" + .value')
+    done < <(echo "$BUILD_VARS" | jq -j 'to_entries[] | .key + "=" + .value + "\u0000"')
   fi
 }
 
@@ -951,14 +953,14 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
     BUILD_OUTPUT_FLAG="--load"
   fi
 
-  if [ -n "$BUILD_ARGS" ]; then
+  if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
     info "Build args: $(echo "$BUILD_VARS" | jq -r 'keys | map(sub("^BUILD_VAR_"; "")) | join(", ")')"
   fi
 
   # Run build and show output directly (no buffering)
   BUILD_OUTPUT=$(mktemp)
   build_latest_tag_flag "$OUTPUT_IMAGE"
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${BUILD_ARGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -1055,14 +1057,13 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
     SERVICE_DOCKERFILE=$(yq eval ".services.${SERVICE}.build.dockerfile // \"Dockerfile\"" "$RESOLVED_COMPOSE")
 
     # Get build args
-    BUILD_ARGS=""
+    BUILD_ARGS=()
     ARGS_YAML=$(yq eval ".services.${SERVICE}.build.args // {}" "$RESOLVED_COMPOSE")
     if [ "$ARGS_YAML" != "{}" ] && [ "$ARGS_YAML" != "null" ]; then
-      while IFS= read -r arg_line; do
-        if [ -n "$arg_line" ]; then
-          BUILD_ARGS="$BUILD_ARGS --build-arg $arg_line"
-        fi
-      done <<< "$(yq eval ".services.${SERVICE}.build.args | to_entries | .[] | .key + \"=\" + (.value | tostring)" "$RESOLVED_COMPOSE" 2>/dev/null)"
+      while IFS= read -r -d '' arg_line; do
+        [ -z "$arg_line" ] && continue
+        BUILD_ARGS+=(--build-arg "$arg_line")
+      done < <(yq eval -o=json ".services.${SERVICE}.build.args" "$RESOLVED_COMPOSE" 2>/dev/null | jq -j 'to_entries[] | .key + "=" + (.value | tostring) + "\u0000"')
     fi
 
     # Generate image name: OUTPUT_IMAGE-{service}
@@ -1076,7 +1077,7 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
     # Build the service (resolve context relative to source directory)
     FULL_BUILD_CONTEXT="$EFFECTIVE_SOURCE_DIR/$BUILD_CONTEXT"
     build_latest_tag_flag "$SERVICE_IMAGE"
-    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS \
+    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${BUILD_ARGS[@]}" \
         -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
         -t "$SERVICE_IMAGE" $LATEST_TAG_FLAG --push \
         "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
@@ -2281,12 +2282,12 @@ if [ "$PUSH_IMAGE" = "false" ]; then
   BUILD_OUTPUT_FLAG="--load"
 fi
 
-if [ -n "$BUILD_ARGS" ]; then
+if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
   info "Build args: $(echo "$BUILD_VARS" | jq -r 'keys | map(sub("^BUILD_VAR_"; "")) | join(", ")')"
 fi
 
 build_latest_tag_flag "$OUTPUT_IMAGE"
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS $BUILD_ARGS -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${BUILD_ARGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
