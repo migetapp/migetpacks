@@ -117,7 +117,7 @@ RUN --mount=type=cache,id=${cargo_id},target=/usr/local/cargo/registry,sharing=s
     && for dir in static public assets templates dist build; do \\
          if [ -d "\$dir" ]; then cp -r "\$dir" /build/; fi; \\
        done \\
-    && rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null; true
+    && (rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
@@ -130,7 +130,7 @@ RUN --mount=type=cache,id=${cargo_id},target=/usr/local/cargo/registry,sharing=s
     && for dir in static public assets templates dist build; do \\
          if [ -d "\$dir" ]; then cp -r "\$dir" /build/; fi; \\
        done \\
-    && rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null; true
+    && (rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null || true)
 EOF
     fi
   else
@@ -150,7 +150,7 @@ RUN ${build_command} \\
     && for dir in static public assets templates dist build; do \\
          if [ -d "\$dir" ]; then cp -r "\$dir" /build/; fi; \\
        done \\
-    && rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null; true
+    && (rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
@@ -161,7 +161,7 @@ RUN cargo build --release \\
     && for dir in static public assets templates dist build; do \\
          if [ -d "\$dir" ]; then cp -r "\$dir" /build/; fi; \\
        done \\
-    && rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null; true
+    && (rm -rf src target Cargo.toml Cargo.lock .git .github 2>/dev/null || true)
 EOF
     fi
   fi

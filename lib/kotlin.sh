@@ -75,7 +75,7 @@ EOF
 RUN --mount=type=cache,id=${gradle_id},target=/root/.gradle/caches,sharing=shared \\
     --mount=type=cache,id=${gradle_id}-wrapper,target=/root/.gradle/wrapper,sharing=shared \\
     ${build_command} \\
-    && rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
@@ -84,7 +84,7 @@ EOF
 RUN --mount=type=cache,id=${gradle_id},target=/root/.gradle/caches,sharing=shared \\
     --mount=type=cache,id=${gradle_id}-wrapper,target=/root/.gradle/wrapper,sharing=shared \\
     ${gradle_cmd} build -x test --no-daemon \\
-    && rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null || true)
 EOF
     fi
   else
@@ -101,14 +101,14 @@ EOF
       cat >> "$dockerfile" <<EOF
 
 RUN ${build_command} \\
-    && rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
 
 # Build and cleanup source files
 RUN ${gradle_cmd} build -x test --no-daemon \\
-    && rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ gradle/ gradlew* build.gradle* settings.gradle* gradle.properties 2>/dev/null || true)
 EOF
     fi
   fi

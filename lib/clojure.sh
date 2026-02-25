@@ -94,7 +94,7 @@ EOF
 RUN --mount=type=cache,id=${lein_id},target=/root/.lein,sharing=shared \\
     --mount=type=cache,id=${m2_id},target=/root/.m2,sharing=shared \\
     ${build_command} \\
-    && rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
@@ -103,7 +103,7 @@ EOF
 RUN --mount=type=cache,id=${lein_id},target=/root/.lein,sharing=shared \\
     --mount=type=cache,id=${m2_id},target=/root/.m2,sharing=shared \\
     lein ${build_task} \\
-    && rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null || true)
 EOF
     fi
   else
@@ -120,14 +120,14 @@ EOF
       cat >> "$dockerfile" <<EOF
 
 RUN ${build_command} \\
-    && rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
 
 # Build uberjar and cleanup source files
 RUN lein ${build_task} \\
-    && rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ test/ dev/ resources/public/js/compiled 2>/dev/null || true)
 EOF
     fi
   fi

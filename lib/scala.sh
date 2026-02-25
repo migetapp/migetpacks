@@ -158,7 +158,7 @@ RUN --mount=type=cache,id=${sbt_id},target=/root/.sbt,sharing=shared \\
     --mount=type=cache,id=${ivy_id},target=/root/.ivy2,sharing=shared \\
     --mount=type=cache,id=${coursier_id},target=/root/.cache/coursier,sharing=shared \\
     ${build_command} \\
-    && rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null || true)
 EOF
     else
       # Default sbt build command
@@ -178,7 +178,7 @@ RUN --mount=type=cache,id=${sbt_id},target=/root/.sbt,sharing=shared \\
     --mount=type=cache,id=${ivy_id},target=/root/.ivy2,sharing=shared \\
     --mount=type=cache,id=${coursier_id},target=/root/.cache/coursier,sharing=shared \\
     sbt ${sbt_tasks} \\
-    && rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null || true)
 EOF
     fi
   else
@@ -195,7 +195,7 @@ EOF
       cat >> "$dockerfile" <<EOF
 
 RUN ${build_command} \\
-    && rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null || true)
 EOF
     else
       local sbt_tasks="compile stage"
@@ -211,7 +211,7 @@ EOF
 
 # Build and cleanup source files
 RUN sbt ${sbt_tasks} \\
-    && rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null; true
+    && (rm -rf .git .github .gitignore src/ project/ build.sbt 2>/dev/null || true)
 EOF
     fi
   fi

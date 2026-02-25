@@ -140,7 +140,7 @@ RUN ${build_command} \\
     && if [ -f package-lock.json ]; then npm prune --production; \\
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \\
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \\
-    && rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null; true
+    && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
@@ -149,7 +149,7 @@ RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run herok
     && if [ -f package-lock.json ]; then npm prune --production; \
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \
-    && rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null; true
+    && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     fi
     # Save cache for S3 upload
@@ -182,7 +182,7 @@ RUN ${build_command} \\
     && if [ -f package-lock.json ]; then npm prune --production; \\
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \\
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \\
-    && rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null; true
+    && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
@@ -191,7 +191,7 @@ RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run herok
     && if [ -f package-lock.json ]; then npm prune --production; \
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \
-    && rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null; true
+    && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     fi
   else
@@ -212,7 +212,7 @@ RUN ${build_command} \\
     && if [ -f package-lock.json ]; then npm prune --production; \\
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \\
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \\
-    && rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null; true
+    && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
@@ -221,7 +221,7 @@ RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run herok
     && if [ -f package-lock.json ]; then npm prune --production; \
        elif [ -f yarn.lock ]; then yarn install --production --frozen-lockfile --ignore-scripts; \
        elif [ -f pnpm-lock.yaml ]; then pnpm prune --prod; fi \
-    && rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null; true
+    && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     fi
   fi

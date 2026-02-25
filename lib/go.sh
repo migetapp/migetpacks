@@ -131,7 +131,7 @@ EOF
 RUN --mount=type=cache,id=${go_id},target=/go/pkg/mod,sharing=shared \\
     --mount=type=cache,id=${gobuild_id},target=/root/.cache/go-build,sharing=shared \\
     ${pre_compile}${build_command}${migrate_install}${post_compile} \\
-    && rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null; true
+    && (rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null || true)
 EOF
     else
       # Build based on package spec
@@ -143,7 +143,7 @@ EOF
 RUN --mount=type=cache,id=${go_id},target=/go/pkg/mod,sharing=shared \\
     --mount=type=cache,id=${gobuild_id},target=/root/.cache/go-build,sharing=shared \\
     ${pre_compile}go build -ldflags="${ldflags}" ${GO_BUILD_FLAGS} -o /build/${binary_name} .${migrate_install}${post_compile} \\
-    && rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null; true
+    && (rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null || true)
 EOF
       else
         # Multiple packages or pattern (./cmd/...)
@@ -154,7 +154,7 @@ RUN --mount=type=cache,id=${go_id},target=/go/pkg/mod,sharing=shared \\
     --mount=type=cache,id=${gobuild_id},target=/root/.cache/go-build,sharing=shared \\
     mkdir -p /build/bin \\
     && ${pre_compile}go build -ldflags="${ldflags}" ${GO_BUILD_FLAGS} -o /build/bin/ ${packages}${migrate_install}${post_compile} \\
-    && rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null; true
+    && (rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null || true)
 EOF
       fi
     fi
@@ -172,7 +172,7 @@ EOF
       cat >> "$dockerfile" <<EOF
 
 RUN ${pre_compile}${build_command}${migrate_install}${post_compile} \\
-    && rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null; true
+    && (rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null || true)
 EOF
     else
       if [ "$packages" = "." ]; then
@@ -180,7 +180,7 @@ EOF
 
 # Build static binary and cleanup source files
 RUN ${pre_compile}go build -ldflags="${ldflags}" ${GO_BUILD_FLAGS} -o /build/${binary_name} .${migrate_install}${post_compile} \\
-    && rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null; true
+    && (rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null || true)
 EOF
       else
         cat >> "$dockerfile" <<EOF
@@ -188,7 +188,7 @@ EOF
 # Build multiple binaries and cleanup source files
 RUN mkdir -p /build/bin \\
     && ${pre_compile}go build -ldflags="${ldflags}" ${GO_BUILD_FLAGS} -o /build/bin/ ${packages}${migrate_install}${post_compile} \\
-    && rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null; true
+    && (rm -rf .git .github .gitignore *.go go.mod go.sum vendor/ 2>/dev/null || true)
 EOF
       fi
     fi

@@ -99,13 +99,13 @@ EOF
       cat >> "$dockerfile" <<EOF
 RUN ${build_command} \\
     && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \\
-       rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null; true
+       (rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
 RUN if [ -f manage.py ]; then /app/.venv/bin/python manage.py collectstatic --noinput 2>/dev/null || true; fi \
     && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
-       rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null; true
+       (rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null || true)
 EOF
     fi
     echo 'ENV PATH="/app/.venv/bin:$PATH"' >> "$dockerfile"
@@ -136,13 +136,13 @@ EOF
       cat >> "$dockerfile" <<EOF
 RUN . /opt/venv/bin/activate && ${build_command} \\
     && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \\
-       rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null; true
+       (rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
 RUN . /opt/venv/bin/activate && if [ -f manage.py ]; then python manage.py collectstatic --noinput 2>/dev/null || true; fi \
     && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
-       rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null; true
+       (rm -rf .git .github .gitignore test tests pytest.ini .pytest_cache .coverage htmlcov 2>/dev/null || true)
 EOF
     fi
     echo 'ENV PATH="/opt/venv/bin:$PATH"' >> "$dockerfile"
