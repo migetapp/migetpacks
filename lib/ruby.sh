@@ -270,7 +270,7 @@ ENV DATABASE_URL=${dummy_db_url}
 RUN ${build_command} && \\
     bundle exec rake assets:precompile && \\
     bundle exec rake assets:clean && \\
-    rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null; true
+    (rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<EOF
@@ -281,7 +281,7 @@ ENV SECRET_KEY_BASE_DUMMY=1
 ENV DATABASE_URL=${dummy_db_url}
 RUN bundle exec rake assets:precompile && \\
     bundle exec rake assets:clean && \\
-    rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null; true
+    (rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null || true)
 EOF
     fi
   else
@@ -289,11 +289,11 @@ EOF
     if [ -n "$build_command" ]; then
       cat >> "$dockerfile" <<EOF
 RUN ${build_command} && \\
-    rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null; true
+    (rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null || true)
 EOF
     else
       cat >> "$dockerfile" <<'EOF'
-RUN rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null; true
+RUN rm -rf .git .github .gitignore test tests spec features .rspec .rubocop* vendor/bundle/ruby/*/cache 2>/dev/null || true
 EOF
     fi
   fi

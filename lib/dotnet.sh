@@ -63,7 +63,7 @@ RUN ${mount_prefix}if [ -f .config/dotnet-tools.json ]; then dotnet tool restore
 RUN rm -rf */obj */*/obj */*/*/obj 2>/dev/null; \\
     rm -rf */bin/Release/net* */bin/Debug 2>/dev/null; \\
     find . -maxdepth 3 -type f \\( -name "*.cs" -o -name "*.fs" -o -name "*.vb" -o -name "*.csproj" -o -name "*.fsproj" -o -name "*.vbproj" -o -name "*.sln" -o -name "*.slnx" \\) -delete 2>/dev/null; \\
-    rm -rf .git .github .config/dotnet-tools.json 2>/dev/null; true
+    (rm -rf .git .github .config/dotnet-tools.json 2>/dev/null || true)
 EOF
   fi
 }
