@@ -1847,6 +1847,9 @@ if [ ${#ADDITIONAL_LANGS[@]} -gt 0 ] && [ "$LANG_NORMALIZED" != "ruby" ]; then
     fi
 
     info "Building: ${bp_lang}"
+    # Install dependencies first (e.g. npm install), then run build (e.g. npm run build)
+    # Source already copied via COPY . . so lockfiles are available
+    buildpack_generate_deps "$RUNTIME_DOCKERFILE" "$bp_lang" "$EFFECTIVE_SOURCE_DIR"
     buildpack_generate_build "$RUNTIME_DOCKERFILE" "$bp_lang" "$EFFECTIVE_SOURCE_DIR"
   done
 fi
