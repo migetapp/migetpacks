@@ -36,7 +36,20 @@ DEFAULT_WEB_PROCESS=""
 
 case "$LANG_NORMALIZED" in
   node.js|nodejs|node)
-    if [ -f "$BUILD_DIR/package.json" ]; then
+    # Detect Next.js standalone output mode
+    NEXTJS_STANDALONE=""
+    for cfg in next.config.js next.config.ts next.config.mjs; do
+      if [ -f "$BUILD_DIR/$cfg" ]; then
+        if grep -qE 'output\s*:\s*["\x27]standalone["\x27]' "$BUILD_DIR/$cfg" 2>/dev/null; then
+          NEXTJS_STANDALONE="true"
+        fi
+        break
+      fi
+    done
+
+    if [ "$NEXTJS_STANDALONE" = "true" ]; then
+      DEFAULT_WEB_PROCESS="node server.js"
+    elif [ -f "$BUILD_DIR/package.json" ]; then
       if grep -q '"start"' "$BUILD_DIR/package.json"; then
         DEFAULT_WEB_PROCESS="npm start"
       else
