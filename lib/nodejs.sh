@@ -43,6 +43,22 @@ nodejs_detect_pkg_manager() {
   fi
 }
 
+# Detect Next.js standalone output mode
+# Sets: NEXTJS_STANDALONE="true" if next.config.{js,ts,mjs} has output: "standalone"
+nodejs_detect_nextjs_standalone() {
+  local build_dir="$1"
+  NEXTJS_STANDALONE=""
+
+  for cfg in next.config.js next.config.ts next.config.mjs; do
+    if [ -f "$build_dir/$cfg" ]; then
+      if grep -qE 'output\s*:\s*["\x27]standalone["\x27]' "$build_dir/$cfg" 2>/dev/null; then
+        NEXTJS_STANDALONE="true"
+      fi
+      break
+    fi
+  done
+}
+
 # Get Docker images for Node.js builds
 # Sets: BUILD_IMAGE, RUNTIME_IMAGE
 nodejs_get_images() {
@@ -106,7 +122,7 @@ RUN --mount=type=cache,id=${npm_id},target=/tmp/buildkit-npm,sharing=shared \\
     && cp -r /tmp/buildkit-npm/* /root/.npm/ 2>/dev/null || true \\
     && cp -r /tmp/buildkit-yarn/* /root/.yarn/ 2>/dev/null || true \\
     && cp -r /tmp/buildkit-pnpm/* /root/.pnpm-store/ 2>/dev/null || true \\
-    && if [ -f package-lock.json ]; then npm ci || npm install; \\
+    && if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \\
        elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \\
        elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \\
        else npm install; fi \\
@@ -124,7 +140,7 @@ RUN mkdir -p /root/.npm /root/.yarn /root/.pnpm-store \
     && (cp -rn /tmp/s3-npm-cache/* /root/.npm/ 2>/dev/null || true) \
     && (cp -rn /tmp/s3-yarn-cache/* /root/.yarn/ 2>/dev/null || true) \
     && (cp -rn /tmp/s3-pnpm-cache/* /root/.pnpm-store/ 2>/dev/null || true) \
-    && if [ -f package-lock.json ]; then npm ci || npm install; \
+    && if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \
        elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \
        elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \
        else npm install; fi
@@ -167,7 +183,7 @@ EOF
 RUN --mount=type=cache,id=${npm_id},target=/root/.npm,sharing=shared \\
     --mount=type=cache,id=${yarn_id},target=/root/.yarn,sharing=shared \\
     --mount=type=cache,id=${pnpm_id},target=/root/.pnpm-store,sharing=shared \\
-    if [ -f package-lock.json ]; then npm ci || npm install; \\
+    if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \\
     elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \\
     elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \\
     else npm install; fi
@@ -197,7 +213,7 @@ EOF
   else
     # No cache mounts available - install without persistent cache
     cat >> "$dockerfile" <<'EOF'
-RUN if [ -f package-lock.json ]; then npm ci || npm install; \
+RUN if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \
     elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \
     elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \
     else npm install; fi
@@ -224,6 +240,54 @@ RUN if grep -q '"heroku-postbuild"' package.json 2>/dev/null; then npm run herok
     && (rm -rf .git .github .gitignore test tests spec __tests__ coverage .nyc_output .cache 2>/dev/null || true)
 EOF
     fi
+  fi
+}
+
+# Generate Next.js standalone assembly step for builder stage
+# Copies static assets and public dir into the standalone output
+# Args: dockerfile_path
+nodejs_generate_nextjs_standalone_assembly() {
+  local dockerfile="$1"
+
+  cat >> "$dockerfile" <<'EOF'
+
+# Assemble Next.js standalone output
+RUN cp -r .next/static .next/standalone/.next/static 2>/dev/null || true \
+    && cp -r public .next/standalone/public 2>/dev/null || true
+EOF
+}
+
+# Generate optimized runtime COPY for Next.js standalone
+# Args: dockerfile_path, runtime_image, is_dhi, dhi_user
+nodejs_generate_nextjs_standalone_runtime_base() {
+  local dockerfile="$1"
+  local runtime_image="$2"
+  local is_dhi="$3"
+  local dhi_user="$4"
+
+  if [ "$is_dhi" = "true" ]; then
+    cat >> "$dockerfile" <<DOCKERFILE_FOOTER
+
+# Runtime stage (Next.js standalone)
+FROM ${runtime_image}
+
+WORKDIR /app
+COPY --from=builder --chown=${dhi_user}:${dhi_user} /build/.next/standalone /app
+DOCKERFILE_FOOTER
+  else
+    cat >> "$dockerfile" <<DOCKERFILE_FOOTER
+
+# Runtime stage (Next.js standalone)
+FROM ${runtime_image}
+
+# Create non-root user with home directory
+RUN getent group 1000 >/dev/null 2>&1 || groupadd -g 1000 miget; \\
+    getent passwd 1000 >/dev/null 2>&1 || useradd -u 1000 -g 1000 -m miget; \\
+    mkdir -p /home/miget && chown 1000:1000 /home/miget
+
+WORKDIR /app
+COPY --from=builder --chown=1000:1000 /build/.next/standalone /app
+DOCKERFILE_FOOTER
   fi
 }
 

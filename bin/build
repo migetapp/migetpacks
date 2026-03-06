@@ -1201,6 +1201,10 @@ if [ "$LANG_NORMALIZED" = "nodejs" ] || [ "$LANG_NORMALIZED" = "node" ] || [ -n 
     warning "Multiple lockfiles detected - using $NODEJS_PKG_MANAGER"
     warning "Remove unused lockfiles (package-lock.json, yarn.lock, pnpm-lock.yaml)"
   fi
+  nodejs_detect_nextjs_standalone "$EFFECTIVE_SOURCE_DIR"
+  if [ "$NEXTJS_STANDALONE" = "true" ]; then
+    info "Next.js standalone output detected"
+  fi
 fi
 
 # Detect web process from Procfile or language defaults
@@ -1787,6 +1791,9 @@ echo "" >> "$RUNTIME_DOCKERFILE"
 case "$LANG_NORMALIZED" in
   node.js|nodejs|node)
     nodejs_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND" "$S3_CACHE_BUCKET" "$CACHE_KEY"
+    if [ "$NEXTJS_STANDALONE" = "true" ]; then
+      nodejs_generate_nextjs_standalone_assembly "$RUNTIME_DOCKERFILE"
+    fi
     ;;
   deno)
     deno_generate_builder "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_COMMAND"
@@ -1881,7 +1888,9 @@ fi
 
 if [ "$IS_DHI_IMAGE" = true ]; then
   # DHI runtime base - language-specific handlers or generic fallback
-  if [ "$LANG_NORMALIZED" = "ruby" ]; then
+  if [ "$NEXTJS_STANDALONE" = "true" ]; then
+    nodejs_generate_nextjs_standalone_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "true" "$DHI_USER"
+  elif [ "$LANG_NORMALIZED" = "ruby" ]; then
     ruby_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "$EFFECTIVE_SOURCE_DIR" "$IS_DHI_IMAGE" "$DHI_USER"
   else
     cat >> "$RUNTIME_DOCKERFILE" <<DOCKERFILE_FOOTER
@@ -1895,7 +1904,9 @@ DOCKERFILE_FOOTER
   fi
 else
   # Ruby and Python use optimized layer ordering: apt-get first (cacheable), then COPY (changes every build)
-  if [ "$LANG_NORMALIZED" = "ruby" ]; then
+  if [ "$NEXTJS_STANDALONE" = "true" ]; then
+    nodejs_generate_nextjs_standalone_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "false" ""
+  elif [ "$LANG_NORMALIZED" = "ruby" ]; then
     ruby_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "$EFFECTIVE_SOURCE_DIR" "$IS_DHI_IMAGE" "$DHI_USER"
   elif [ "$LANG_NORMALIZED" = "python" ]; then
     python_generate_runtime_base "$RUNTIME_DOCKERFILE" "$RUNTIME_IMAGE" "$EFFECTIVE_SOURCE_DIR"
