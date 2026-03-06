@@ -273,6 +273,7 @@ FROM ${runtime_image}
 
 WORKDIR /app
 COPY --from=builder --chown=${dhi_user}:${dhi_user} /build/.next/standalone /app
+ENV HOSTNAME=::
 DOCKERFILE_FOOTER
   else
     cat >> "$dockerfile" <<DOCKERFILE_FOOTER
@@ -287,6 +288,7 @@ RUN getent group 1000 >/dev/null 2>&1 || groupadd -g 1000 miget; \\
 
 WORKDIR /app
 COPY --from=builder --chown=1000:1000 /build/.next/standalone /app
+ENV HOSTNAME=::
 DOCKERFILE_FOOTER
   fi
 }
