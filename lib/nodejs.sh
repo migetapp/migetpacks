@@ -94,7 +94,6 @@ nodejs_generate_builder() {
   cat >> "$dockerfile" <<EOF
 # Copy package files first for layer caching (npm install cached if lockfiles unchanged)
 COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
-ENV NODE_ENV=production
 ENV NPM_CONFIG_LOGLEVEL=error
 ENV NODE_VERBOSE=false
 ENV NODE_OPTIONS="${node_options}"
@@ -122,7 +121,7 @@ RUN --mount=type=cache,id=${npm_id},target=/tmp/buildkit-npm,sharing=shared \\
     && cp -r /tmp/buildkit-npm/* /root/.npm/ 2>/dev/null || true \\
     && cp -r /tmp/buildkit-yarn/* /root/.yarn/ 2>/dev/null || true \\
     && cp -r /tmp/buildkit-pnpm/* /root/.pnpm-store/ 2>/dev/null || true \\
-    && if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \\
+    && if [ -f package-lock.json ]; then npm ci; \\
        elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \\
        elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \\
        else npm install; fi \\
@@ -140,7 +139,7 @@ RUN mkdir -p /root/.npm /root/.yarn /root/.pnpm-store \
     && (cp -rn /tmp/s3-npm-cache/* /root/.npm/ 2>/dev/null || true) \
     && (cp -rn /tmp/s3-yarn-cache/* /root/.yarn/ 2>/dev/null || true) \
     && (cp -rn /tmp/s3-pnpm-cache/* /root/.pnpm-store/ 2>/dev/null || true) \
-    && if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \
+    && if [ -f package-lock.json ]; then npm ci; \
        elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \
        elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \
        else npm install; fi
@@ -149,6 +148,10 @@ RUN mkdir -p /root/.npm /root/.yarn /root/.pnpm-store \
 COPY . .
 EOF
     fi
+    # Set NODE_ENV=production for build (frameworks use it for optimized output) and prune
+    cat >> "$dockerfile" <<'EOF'
+ENV NODE_ENV=production
+EOF
     # Build, prune, and cleanup layer
     if [ -n "$build_command" ]; then
       cat >> "$dockerfile" <<EOF
@@ -183,13 +186,17 @@ EOF
 RUN --mount=type=cache,id=${npm_id},target=/root/.npm,sharing=shared \\
     --mount=type=cache,id=${yarn_id},target=/root/.yarn,sharing=shared \\
     --mount=type=cache,id=${pnpm_id},target=/root/.pnpm-store,sharing=shared \\
-    if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \\
+    if [ -f package-lock.json ]; then npm ci; \\
     elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \\
     elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \\
     else npm install; fi
 
 # Copy rest of source code (this layer changes on every code change)
 COPY . .
+EOF
+    # Set NODE_ENV=production for build (frameworks use it for optimized output) and prune
+    cat >> "$dockerfile" <<'EOF'
+ENV NODE_ENV=production
 EOF
     # Build, prune, and cleanup layer
     if [ -n "$build_command" ]; then
@@ -213,13 +220,17 @@ EOF
   else
     # No cache mounts available - install without persistent cache
     cat >> "$dockerfile" <<'EOF'
-RUN if [ -f package-lock.json ]; then npm ci --include=dev && npm install --include=optional; \
+RUN if [ -f package-lock.json ]; then npm ci; \
     elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \
     elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \
     else npm install; fi
 
 # Copy rest of source code (this layer changes on every code change)
 COPY . .
+EOF
+    # Set NODE_ENV=production for build (frameworks use it for optimized output) and prune
+    cat >> "$dockerfile" <<'EOF'
+ENV NODE_ENV=production
 EOF
     # Build, prune, and cleanup layer
     if [ -n "$build_command" ]; then
