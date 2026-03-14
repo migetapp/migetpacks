@@ -121,7 +121,7 @@ RUN --mount=type=cache,id=${npm_id},target=/tmp/buildkit-npm,sharing=shared \\
     && cp -r /tmp/buildkit-npm/* /root/.npm/ 2>/dev/null || true \\
     && cp -r /tmp/buildkit-yarn/* /root/.yarn/ 2>/dev/null || true \\
     && cp -r /tmp/buildkit-pnpm/* /root/.pnpm-store/ 2>/dev/null || true \\
-    && if [ -f package-lock.json ]; then npm ci && npm install --include=optional; \\
+    && if [ -f package-lock.json ]; then npm ci; \\
        elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \\
        elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \\
        else npm install; fi \\
@@ -139,7 +139,7 @@ RUN mkdir -p /root/.npm /root/.yarn /root/.pnpm-store \
     && (cp -rn /tmp/s3-npm-cache/* /root/.npm/ 2>/dev/null || true) \
     && (cp -rn /tmp/s3-yarn-cache/* /root/.yarn/ 2>/dev/null || true) \
     && (cp -rn /tmp/s3-pnpm-cache/* /root/.pnpm-store/ 2>/dev/null || true) \
-    && if [ -f package-lock.json ]; then npm ci && npm install --include=optional; \
+    && if [ -f package-lock.json ]; then npm ci; \
        elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \
        elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \
        else npm install; fi
@@ -186,7 +186,7 @@ EOF
 RUN --mount=type=cache,id=${npm_id},target=/root/.npm,sharing=shared \\
     --mount=type=cache,id=${yarn_id},target=/root/.yarn,sharing=shared \\
     --mount=type=cache,id=${pnpm_id},target=/root/.pnpm-store,sharing=shared \\
-    if [ -f package-lock.json ]; then npm ci && npm install --include=optional; \\
+    if [ -f package-lock.json ]; then npm ci; \\
     elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \\
     elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \\
     else npm install; fi
@@ -220,7 +220,7 @@ EOF
   else
     # No cache mounts available - install without persistent cache
     cat >> "$dockerfile" <<'EOF'
-RUN if [ -f package-lock.json ]; then npm ci && npm install --include=optional; \
+RUN if [ -f package-lock.json ]; then npm ci; \
     elif [ -f yarn.lock ]; then (command -v yarn || npm install -g yarn) && (yarn install --frozen-lockfile || yarn install); \
     elif [ -f pnpm-lock.yaml ]; then (command -v pnpm || npm install -g pnpm) && (pnpm install --frozen-lockfile || pnpm install); \
     else npm install; fi
