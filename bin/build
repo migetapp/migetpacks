@@ -1200,7 +1200,7 @@ if [ "$LANG_NORMALIZED" = "nodejs" ] || [ "$LANG_NORMALIZED" = "node" ] || [ -n 
   if [ "$NODEJS_MULTIPLE_LOCKFILES" = "true" ]; then
     warning "Multiple lockfiles detected - using $NODEJS_PKG_MANAGER"
     # Actually remove unused lockfiles so the Dockerfile install step uses the correct package manager
-    local removed_lockfiles=""
+    removed_lockfiles=""
     if [ "$NODEJS_PKG_MANAGER" != "npm" ] && [ -f "$EFFECTIVE_SOURCE_DIR/package-lock.json" ]; then
       rm -f "$EFFECTIVE_SOURCE_DIR/package-lock.json"
       removed_lockfiles="${removed_lockfiles:+$removed_lockfiles, }package-lock.json"
