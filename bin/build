@@ -1199,15 +1199,22 @@ if [ "$LANG_NORMALIZED" = "nodejs" ] || [ "$LANG_NORMALIZED" = "node" ] || [ -n 
   fi
   if [ "$NODEJS_MULTIPLE_LOCKFILES" = "true" ]; then
     warning "Multiple lockfiles detected - using $NODEJS_PKG_MANAGER"
-    # Remove unused lockfiles so the Dockerfile install step uses the correct package manager
+    # Actually remove unused lockfiles so the Dockerfile install step uses the correct package manager
+    local removed_lockfiles=""
     if [ "$NODEJS_PKG_MANAGER" != "npm" ] && [ -f "$EFFECTIVE_SOURCE_DIR/package-lock.json" ]; then
       rm -f "$EFFECTIVE_SOURCE_DIR/package-lock.json"
+      removed_lockfiles="${removed_lockfiles:+$removed_lockfiles, }package-lock.json"
     fi
     if [ "$NODEJS_PKG_MANAGER" != "yarn" ] && [ -f "$EFFECTIVE_SOURCE_DIR/yarn.lock" ]; then
       rm -f "$EFFECTIVE_SOURCE_DIR/yarn.lock"
+      removed_lockfiles="${removed_lockfiles:+$removed_lockfiles, }yarn.lock"
     fi
     if [ "$NODEJS_PKG_MANAGER" != "pnpm" ] && [ -f "$EFFECTIVE_SOURCE_DIR/pnpm-lock.yaml" ]; then
       rm -f "$EFFECTIVE_SOURCE_DIR/pnpm-lock.yaml"
+      removed_lockfiles="${removed_lockfiles:+$removed_lockfiles, }pnpm-lock.yaml"
+    fi
+    if [ -n "$removed_lockfiles" ]; then
+      info "Removed unused lockfiles: $removed_lockfiles"
     fi
   fi
   nodejs_detect_nextjs_standalone "$EFFECTIVE_SOURCE_DIR"
