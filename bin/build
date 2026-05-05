@@ -898,13 +898,8 @@ elif [ "$APP_JSON_BUILDPACKS" != "[]" ]; then
   fi
 fi
 
-# Detect language if not specified.
-# Dockerfile builds (DOCKERFILE_PATH set) don't need a buildpack language —
-# they use the user's Dockerfile directly further down. Skip detection in
-# that case so apps with no buildpack-detectable language (pure-Docker
-# stacks like postgres+timescaledb wrappers, sidecars, db tooling) build
-# successfully instead of failing with "Unable to detect language".
-if [ -z "$LANGUAGE" ] && [ -z "$DOCKERFILE_PATH" ]; then
+# Detect language if not specified
+if [ -z "$LANGUAGE" ]; then
   DETECTED_LANGUAGE=$(PROJECT_PATH="" "$BUILDPACK_DIR/bin/detect" "$EFFECTIVE_SOURCE_DIR" 2>/dev/null || true)
   if [ -z "$DETECTED_LANGUAGE" ]; then
     handle_build_failure 1 "Unable to detect language. Please set LANGUAGE environment variable."
