@@ -898,9 +898,17 @@ elif [ "$APP_JSON_BUILDPACKS" != "[]" ]; then
   fi
 fi
 
-# Detect language if not specified
+# Detect language if not specified.
+# When detection fails AND DOCKERFILE_PATH is set, fall back to "dockerfile"
+# instead of erroring — this supports pure-Docker apps whose source tree
+# doesn't match any buildpack heuristic (db tooling, sidecars, wrappers
+# on top of base images). Apps that DO match a heuristic continue to take
+# the same code path as before, so this is non-disruptive.
 if [ -z "$LANGUAGE" ]; then
   DETECTED_LANGUAGE=$(PROJECT_PATH="" "$BUILDPACK_DIR/bin/detect" "$EFFECTIVE_SOURCE_DIR" 2>/dev/null || true)
+  if [ -z "$DETECTED_LANGUAGE" ] && [ -n "$DOCKERFILE_PATH" ]; then
+    DETECTED_LANGUAGE="dockerfile"
+  fi
   if [ -z "$DETECTED_LANGUAGE" ]; then
     handle_build_failure 1 "Unable to detect language. Please set LANGUAGE environment variable."
   fi
