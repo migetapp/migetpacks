@@ -48,6 +48,31 @@ These variables enable Docker Hardened Images for secure, minimal containers.
 | `DHI_PASSWORD` | No | - | DHI registry password/token |
 | `DHI_MIRROR` | No | - | DHI registry mirror URL (e.g., `https://registry.example.io/dhi-io`) |
 
+## External Private Registry
+
+Set these variables when your `Dockerfile` pulls a base image from a private registry (any `FROM <private-host>/...` line). The builder runs `docker login` before invoking the build, so subsequent pulls authenticate. Values may come from the environment directly or from the platform's `BUILD_VARS` JSON envelope.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `EXTERNAL_REGISTRY_URL` | No | - | Registry host (e.g., `docker.io`, `ghcr.io`, `registry.digitalocean.com`, `<account>.dkr.ecr.<region>.amazonaws.com`). No protocol prefix. |
+| `EXTERNAL_REGISTRY_USERNAME` | No | - | Username (or token name where the provider uses it as the username, e.g., `AWS` for ECR). |
+| `EXTERNAL_REGISTRY_PASSWORD` | No | - | Password or read-only access token. Read-only tokens are recommended. |
+
+All three must be present for the login step to run. Login failure is logged and non-fatal — the FROM-pull error then surfaces during `docker build`, matching the DHI block's behaviour.
+
+### Example
+
+```bash docker
+docker run --rm \
+  -v "$(pwd):/workspace/source:ro" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e EXTERNAL_REGISTRY_URL=docker.io \
+  -e EXTERNAL_REGISTRY_USERNAME=my-user \
+  -e EXTERNAL_REGISTRY_PASSWORD=$DOCKERHUB_TOKEN \
+  -e OUTPUT_IMAGE=myapp:latest \
+  miget/migetpacks:latest-alpine
+```
+
 ## Custom Environment Variables
 
 Any environment variable passed to migetpacks that is **not** in the known builder variables list is automatically injected into the generated Dockerfile as an `ENV` statement. This allows you to configure your application's build environment without modifying any configuration files.

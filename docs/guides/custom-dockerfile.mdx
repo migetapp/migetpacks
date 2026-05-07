@@ -131,6 +131,8 @@ EXPOSE 8080
 CMD ["./my-app"]
 ```
 
+If the base image lives in a private registry, set [`EXTERNAL_REGISTRY_URL` / `EXTERNAL_REGISTRY_USERNAME` / `EXTERNAL_REGISTRY_PASSWORD`](../configuration/environment-variables#external-private-registry) on the build so the builder can authenticate before pulling.
+
 ### Complex Multi-Stage Builds
 
 When your build process requires custom stages:

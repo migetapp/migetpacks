@@ -192,6 +192,21 @@ jobs:
 | `DHI_PASSWORD` | No | - | DHI registry password/token |
 | `DHI_MIRROR` | No | - | DHI registry mirror URL |
 
+### External Private Registry
+
+When the app's Dockerfile pulls a base image from a private registry (e.g.
+`FROM private.example.com/team/base-image:tag`), set these vars on the app
+to log the builder in before the build runs. Same names as documented at
+[docs.miget.com/deployments/registry-credentials](https://docs.miget.com/deployments/registry-credentials).
+Read directly from the environment, or extracted from `BUILD_VARS` (the
+JSON envelope the platform uses to ship app vars into the build).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `EXTERNAL_REGISTRY_URL` | No | - | Registry host (e.g. `docker.io`, `ghcr.io`, `registry.digitalocean.com`, `<account>.dkr.ecr.<region>.amazonaws.com`) |
+| `EXTERNAL_REGISTRY_USERNAME` | No | - | Username/token name for the registry login |
+| `EXTERNAL_REGISTRY_PASSWORD` | No | - | Password / read-only access token (recommended) |
+
 ### Custom Build Environment Variables
 
 Any environment variable passed to migetpacks that is **not** a known configuration variable will be automatically injected into the generated Dockerfile as `ENV` statements. This allows you to pass custom build-time settings without modifying migetpacks.

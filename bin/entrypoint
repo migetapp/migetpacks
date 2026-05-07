@@ -103,6 +103,30 @@ if [ -n "$DHI_USERNAME" ] && [ -n "$DHI_PASSWORD" ]; then
   echo "$DHI_PASSWORD" | docker login dhi.io -u "$DHI_USERNAME" --password-stdin >/dev/null 2>&1 || true
 fi
 
+# Configure an external private container registry if the app has set
+# EXTERNAL_REGISTRY_URL / EXTERNAL_REGISTRY_USERNAME / EXTERNAL_REGISTRY_PASSWORD
+# in its env vars. These flow in via $BUILD_VARS (a JSON blob of
+# BUILD_VAR_<KEY>=<value> pairs that the daemon assembles from the app's
+# Settings -> Vars). Same env names as documented at
+# docs.miget.com/deployments/registry-credentials. Logging in here makes
+# subsequent `FROM <private-image>` pulls during `docker build` succeed.
+EXT_URL="${EXTERNAL_REGISTRY_URL:-}"
+EXT_USER="${EXTERNAL_REGISTRY_USERNAME:-}"
+EXT_PASS="${EXTERNAL_REGISTRY_PASSWORD:-}"
+if [ -z "$EXT_URL$EXT_USER$EXT_PASS" ] && [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
+  EXT_URL=$(echo "$BUILD_VARS" | jq -r '."BUILD_VAR_EXTERNAL_REGISTRY_URL" // empty')
+  EXT_USER=$(echo "$BUILD_VARS" | jq -r '."BUILD_VAR_EXTERNAL_REGISTRY_USERNAME" // empty')
+  EXT_PASS=$(echo "$BUILD_VARS" | jq -r '."BUILD_VAR_EXTERNAL_REGISTRY_PASSWORD" // empty')
+fi
+if [ -n "$EXT_URL" ] && [ -n "$EXT_USER" ] && [ -n "$EXT_PASS" ]; then
+  info "Configuring external registry credentials for $EXT_URL"
+  if echo "$EXT_PASS" | docker login "$EXT_URL" -u "$EXT_USER" --password-stdin >/dev/null 2>&1; then
+    success "Logged in to $EXT_URL as $EXT_USER"
+  else
+    error "Failed to log in to $EXT_URL as $EXT_USER (continuing; private FROM pulls will fail)"
+  fi
+fi
+
 # Caching strategy:
 # 1. BUILD_CACHE_DIR (PVC) - BuildKit layer cache stored on shared RWX PVC
 #    Per-app cache IDs (via CACHE_KEY) isolate apps within the shared storage
