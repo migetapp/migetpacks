@@ -172,7 +172,8 @@ inject_custom_env_vars() {
 }
 
 # Build --build-arg flags from BUILD_VARS JSON
-# Strips BUILD_VAR_ prefix from keys, collects values for masking
+# Strips BUILD_VAR_ prefix from keys, collects values whose key name looks
+# sensitive (KEY/SECRET/PASSWORD/TOKEN/etc.) for output masking.
 build_arg_flags_from_build_vars() {
   BUILD_ARGS=()
   BUILD_VAR_VALUES=()
@@ -183,7 +184,9 @@ build_arg_flags_from_build_vars() {
       local value="${entry#*=}"
       local real_key="${key#BUILD_VAR_}"
       BUILD_ARGS+=(--build-arg "${real_key}=${value}")
-      BUILD_VAR_VALUES+=("$value")
+      if [[ "$real_key" =~ (^|_)(KEY|KEYS|SECRET|SECRETS|PASSWORD|PASSWD|TOKEN|TOKENS|BEARER|CREDENTIAL|CREDENTIALS|PRIVATE|NONCE|PASSPHRASE|CERT|CERTIFICATE|SIGNATURE)(_|$) ]]; then
+        BUILD_VAR_VALUES+=("$value")
+      fi
     done < <(echo "$BUILD_VARS" | jq -j 'to_entries[] | .key + "=" + .value + "\u0000"')
   fi
 }
