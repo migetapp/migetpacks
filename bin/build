@@ -207,6 +207,12 @@ esac
 # Parse BUILD_VARS JSON into --build-arg flags and collect values for masking
 build_arg_flags_from_build_vars
 
+# Forward ssh-agent socket to buildx when entrypoint set one up
+SSH_FLAGS=()
+if [ -n "$SSH_AUTH_SOCK" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+  SSH_FLAGS=(--ssh default)
+fi
+
 # Build cache flags for BuildKit
 # NO_CACHE=true: force fresh build (--no-cache), skip cache-from, but still export to cache-to
 CACHE_FLAGS=""
@@ -971,7 +977,7 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
   # Run build and show output directly (no buffering)
   BUILD_OUTPUT=$(mktemp)
   build_latest_tag_flag "$OUTPUT_IMAGE"
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${BUILD_ARGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -1088,7 +1094,7 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
     # Build the service (resolve context relative to source directory)
     FULL_BUILD_CONTEXT="$EFFECTIVE_SOURCE_DIR/$BUILD_CONTEXT"
     build_latest_tag_flag "$SERVICE_IMAGE"
-    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${BUILD_ARGS[@]}" \
+    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" \
         -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
         -t "$SERVICE_IMAGE" $LATEST_TAG_FLAG --push \
         "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
@@ -2328,7 +2334,7 @@ if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
 fi
 
 build_latest_tag_flag "$OUTPUT_IMAGE"
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${BUILD_ARGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then

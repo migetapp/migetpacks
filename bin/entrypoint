@@ -127,6 +127,75 @@ if [ -n "$EXT_URL" ] && [ -n "$EXT_USER" ] && [ -n "$EXT_PASS" ]; then
   fi
 fi
 
+# Configure SSH agent if the app provides private keys via env vars.
+# Keys are read from direct env vars OR from BUILD_VARS (BUILD_VAR_<NAME>).
+# Recognized names: SSH_PRIVATE_KEY, or any var ending in _SSH_KEY
+# (e.g. BITBUCKET_SSH_KEY, GITHUB_SSH_KEY). Loaded keys are forwarded into
+# `docker build` via `--ssh default` so Dockerfiles using
+# `RUN --mount=type=ssh ...` can clone private git deps without baking the
+# key into image layers.
+SSH_KEY_DIR=$(mktemp -d)
+SSH_KEY_COUNT=0
+
+write_ssh_key() {
+  local key="$1"
+  [ -z "$key" ] && return
+  # Trim leading/trailing whitespace; keep internal newlines intact
+  key="${key#"${key%%[![:space:]]*}"}"
+  key="${key%"${key##*[![:space:]]}"}"
+  [ -z "$key" ] && return
+  SSH_KEY_COUNT=$((SSH_KEY_COUNT + 1))
+  local f="$SSH_KEY_DIR/key_$SSH_KEY_COUNT"
+  printf '%s\n' "$key" > "$f"
+  chmod 600 "$f"
+}
+
+# Direct env vars
+for ssh_var in $(compgen -A variable 2>/dev/null | grep -E '^(SSH_PRIVATE_KEY|.*_SSH_KEY)$' || true); do
+  write_ssh_key "${!ssh_var}"
+done
+
+# BUILD_VARS JSON (base64-encoded values to preserve newlines through bash pipeline)
+if [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
+  while IFS= read -r key_b64; do
+    [ -z "$key_b64" ] && continue
+    write_ssh_key "$(printf '%s' "$key_b64" | base64 -d 2>/dev/null || true)"
+  done < <(echo "$BUILD_VARS" | jq -r '
+    to_entries[] |
+    select(.key | test("^BUILD_VAR_(SSH_PRIVATE_KEY|.*_SSH_KEY)$")) |
+    .value | @base64
+  ' 2>/dev/null)
+fi
+
+if [ "$SSH_KEY_COUNT" -gt 0 ]; then
+  info "SSH keys detected; starting ssh-agent for build"
+  eval "$(ssh-agent -s)" >/dev/null
+  LOADED=0
+  FAILED=0
+  for f in "$SSH_KEY_DIR"/key_*; do
+    [ -f "$f" ] || continue
+    if ssh-add "$f" >/dev/null 2>&1; then
+      LOADED=$((LOADED + 1))
+    else
+      FAILED=$((FAILED + 1))
+    fi
+  done
+  rm -rf "$SSH_KEY_DIR"
+  if [ "$LOADED" -gt 0 ]; then
+    if [ "$FAILED" -gt 0 ]; then
+      success "ssh-agent loaded $LOADED key(s) ($FAILED failed)"
+    else
+      success "ssh-agent loaded $LOADED key(s)"
+    fi
+    export SSH_AUTH_SOCK
+  else
+    error "ssh-agent could not load any key (continuing without SSH forwarding)"
+    unset SSH_AUTH_SOCK
+  fi
+else
+  rm -rf "$SSH_KEY_DIR"
+fi
+
 # Caching strategy:
 # 1. BUILD_CACHE_DIR (PVC) - BuildKit layer cache stored on shared RWX PVC
 #    Per-app cache IDs (via CACHE_KEY) isolate apps within the shared storage
