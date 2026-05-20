@@ -9,6 +9,7 @@ ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     jq \
+    openssh-client \
     unzip \
     && rm -rf /var/lib/apt/lists/* \
     && curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TARGETARCH} -o /usr/local/bin/yq \
