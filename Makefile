@@ -52,6 +52,10 @@ test-detect:
 	@echo "Running detection tests..."
 	./test/test-detect.sh
 
+test-generate-secret:
+	@echo "Running generate_secret tests..."
+	./test/test-generate-secret.sh
+
 test-nodejs:
 	@echo "Testing Node.js build..."
 	docker run --rm \
@@ -97,7 +101,7 @@ test-dotnet:
 		-e OUTPUT_IMAGE=test-dotnet:latest \
 		$(FULL_IMAGE)
 
-test: test-detect
+test: test-detect test-generate-secret
 	@echo "All tests passed ✓"
 
 clean:
