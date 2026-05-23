@@ -599,7 +599,9 @@ parse_app_json() {
 
 # Generate secret token (for app.json generator: "secret")
 generate_secret() {
-  openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p
+  # `xxd -p` wraps output at 60 columns by default; strip newlines so the
+  # value is safe to interpolate into a generated Dockerfile ENV directive.
+  openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p | tr -d '\n'
 }
 
 # Detect exposed ports from a Docker image
