@@ -21,17 +21,18 @@ deno_get_images() {
 deno_detect_entrypoint() {
   local build_dir="$1"
 
-  # Check deno.json tasks.start for entry point
+  # Check deno.json common task names for entry point
   if [ -f "$build_dir/deno.json" ]; then
-    local start_task=$(grep -E '"start"' "$build_dir/deno.json" | head -1)
-    if [ -n "$start_task" ]; then
-      # Extract .ts/.tsx/.js file from task command
-      local entrypoint=$(echo "$start_task" | grep -oE '[a-zA-Z0-9_/-]+\.(ts|tsx|js|mts)' | head -1)
+    local task_name task_line entrypoint
+    for task_name in start run dev serve prod; do
+      task_line=$(grep -E "\"${task_name}\"[[:space:]]*:" "$build_dir/deno.json" | head -1)
+      [ -z "$task_line" ] && continue
+      entrypoint=$(echo "$task_line" | grep -oE '[a-zA-Z0-9_/-]+\.(ts|tsx|js|mts)' | head -1)
       if [ -n "$entrypoint" ] && [ -f "$build_dir/$entrypoint" ]; then
         echo "$entrypoint"
         return
       fi
-    fi
+    done
   fi
 
   # Fall back to common entry point patterns
@@ -42,7 +43,7 @@ deno_detect_entrypoint() {
     fi
   done
 
-  # Default to main.ts
+  # Default to main.ts (may not exist; deno_generate_builder guards the cache step)
   echo "main.ts"
 }
 
@@ -109,12 +110,14 @@ EOF
 # Build with custom command
 RUN ${build_command}
 EOF
-  else
+  elif [ -f "$build_dir/$entrypoint" ]; then
     cat >> "$dockerfile" <<EOF
 
 # Cache dependencies and compile entry point
 RUN deno cache ${entrypoint}
 EOF
+  else
+    info "Skipping 'deno cache' — entry point '${entrypoint}' not found in build dir"
   fi
 }
 
