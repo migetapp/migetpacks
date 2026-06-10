@@ -1,4 +1,4 @@
-.PHONY: help build build-alpine push push-alpine test test-detect test-nodejs test-python test-go test-rust test-dotnet clean install
+.PHONY: help build build-alpine push push-alpine test test-detect test-build-vars test-nodejs test-python test-go test-rust test-dotnet clean install
 
 # Variables
 REGISTRY ?= miget
@@ -15,6 +15,7 @@ help:
 	@echo "  make push                 - Push the builder image to registry"
 	@echo "  make test                 - Run all tests"
 	@echo "  make test-detect          - Run detection tests only"
+	@echo "  make test-build-vars      - Run build-var name guard tests"
 	@echo "  make test-nodejs          - Test Node.js example build"
 	@echo "  make test-python          - Test Python example build"
 	@echo "  make test-go              - Test Go example build"
@@ -55,6 +56,10 @@ test-detect:
 test-generate-secret:
 	@echo "Running generate_secret tests..."
 	./test/test-generate-secret.sh
+
+test-build-vars:
+	@echo "Running build-vars guard tests..."
+	./test/test-build-vars.sh
 
 test-nodejs:
 	@echo "Testing Node.js build..."
@@ -101,7 +106,7 @@ test-dotnet:
 		-e OUTPUT_IMAGE=test-dotnet:latest \
 		$(FULL_IMAGE)
 
-test: test-detect test-generate-secret
+test: test-detect test-generate-secret test-build-vars
 	@echo "All tests passed ✓"
 
 clean:

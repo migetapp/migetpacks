@@ -30,6 +30,19 @@ error() {
   echo -e "${RED}-----> ERROR: $1${NC}" >&2
 }
 
+# Validate a name against the POSIX environment-variable identifier rule
+# (IEEE Std 1003.1 sec. 8.1): a letter or underscore followed by letters,
+# digits, or underscores. This is the same constraint Docker enforces on
+# `ARG`/`ENV` keys and shells enforce on `$VAR` expansion.
+#
+# Build args MUST satisfy it; runtime-only settings with other names (e.g. the
+# dotted `discovery.seed_hosts` style used by Elasticsearch/Java) are valid
+# container env vars but cannot be Docker build args, so the build-arg
+# projection skips them. See docs/configuration/environment-variables.mdx.
+is_valid_build_arg_name() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+
 # Detect language
 detect_language() {
   local build_dir=$1

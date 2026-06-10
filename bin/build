@@ -183,6 +183,14 @@ build_arg_flags_from_build_vars() {
       local key="${entry%%=*}"
       local value="${entry#*=}"
       local real_key="${key#BUILD_VAR_}"
+      # Build args must be POSIX identifiers (Docker ARG rule). Runtime-only
+      # settings with dotted/other names (e.g. discovery.seed_hosts) still reach
+      # the container via the env Secret at runtime, but cannot be build args --
+      # skip them here. See docs/configuration/environment-variables.mdx.
+      if ! is_valid_build_arg_name "$real_key"; then
+        warning "Skipping build arg '${real_key}': not a valid Docker ARG name (runtime-only var)"
+        continue
+      fi
       BUILD_ARGS+=(--build-arg "${real_key}=${value}")
       if [[ "$real_key" =~ (^|_)(KEY|KEYS|SECRET|SECRETS|PASSWORD|PASSWD|TOKEN|TOKENS|BEARER|CREDENTIAL|CREDENTIALS|PRIVATE|NONCE|PASSPHRASE|CERT|CERTIFICATE|SIGNATURE)(_|$) ]]; then
         BUILD_VAR_VALUES+=("$value")
@@ -1778,7 +1786,16 @@ if [ -n "$BUILD_VARS" ] && [ "$BUILD_VARS" != "{}" ]; then
   echo "" >> "$RUNTIME_DOCKERFILE"
   echo "# Build-time variables" >> "$RUNTIME_DOCKERFILE"
   echo "$BUILD_VARS" | jq -r 'keys[]' | while read -r key; do
-    echo "ARG ${key#BUILD_VAR_}" >> "$RUNTIME_DOCKERFILE"
+    arg_name="${key#BUILD_VAR_}"
+    # Skip non-identifier keys: `ARG discovery.seed_hosts` is an invalid
+    # Dockerfile instruction and fails the build. Such runtime-only vars reach
+    # the container via the env Secret, not as build args.
+    # See docs/configuration/environment-variables.mdx.
+    if ! is_valid_build_arg_name "$arg_name"; then
+      warning "Skipping ARG '${arg_name}': not a valid Docker ARG name (runtime-only var)"
+      continue
+    fi
+    echo "ARG ${arg_name}" >> "$RUNTIME_DOCKERFILE"
   done
 fi
 
