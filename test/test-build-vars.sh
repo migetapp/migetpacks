@@ -51,6 +51,17 @@ assert "rejects hyphen"             '! is_valid_build_arg_name my-var'
 assert "rejects leading digit"      '! is_valid_build_arg_name 9lives'
 assert "rejects empty"              '! is_valid_build_arg_name ""'
 
+# --- regression: the guard's deps come from lib/common.sh, so the call site
+# must run AFTER the source line. When it ran before (call ~line 216, source
+# ~line 373), is_valid_build_arg_name/warning were undefined at call time:
+# every key returned 127 from the not-found check and ALL build args were
+# silently dropped ("is_valid_build_arg_name: command not found" in builds). ---
+call_line=$(grep -n '^build_arg_flags_from_build_vars$' "$ROOT_DIR/bin/build" | head -1 | cut -d: -f1)
+source_line=$(grep -n 'source .*lib/common\.sh' "$ROOT_DIR/bin/build" | head -1 | cut -d: -f1)
+assert "build-vars call runs after lib/common.sh is sourced" \
+  '[ -n "$call_line" ] && [ -n "$source_line" ] && [ "$call_line" -gt "$source_line" ]' \
+  "call at line ${call_line:-?}, common.sh sourced at line ${source_line:-?}"
+
 # --- integration: build_arg_flags_from_build_vars() skips invalid keys ---
 # Exercise the real implementation extracted from bin/build (same technique as
 # test-generate-secret.sh) so the guard is proven at the actual call site.
