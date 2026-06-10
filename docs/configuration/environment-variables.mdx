@@ -145,3 +145,16 @@ The following categories of variables are **never** passed through to the Docker
 - **Credentials**: `AWS_*` variables (never exposed in images)
 - **Docker/system**: `DOCKER_HOST`, `DOCKER_CONFIG`, `DOCKER_BUILDKIT`, etc.
 - **Shell/system**: `PATH`, `HOME`, `PWD`, `TERM`, `SHELL`, `USER`, `HOSTNAME`, `LANG`, `LC_*`, `XDG_*`, `SSH_*`, etc.
+
+### Build-arg name requirements
+
+App environment variables reach the build through the platform's `BUILD_VARS` envelope and are projected as Docker build args (`--build-arg` flags and generated `ARG` lines). Build args — like shell variables and Dockerfile `ARG`/`ENV` keys — must be **POSIX identifiers** (IEEE Std 1003.1 §8.1): a letter or underscore followed by letters, digits, or underscores, i.e. `^[A-Za-z_][A-Za-z0-9_]*$`.
+
+Keys that don't satisfy this rule — for example dotted settings such as `discovery.seed_hosts` (used by Elasticsearch and other JVM apps) — are **skipped from the build-arg projection and logged**. They are still delivered to the running container as ordinary environment variables; they simply cannot be build args, because `ARG discovery.seed_hosts` is not a valid Dockerfile instruction.
+
+- **Runtime env** (Compose Specification, permissive): keys are preserved verbatim.
+- **Build args** (POSIX / Docker `ARG`): only identifier-safe keys are projected; the rest are runtime-only.
+
+<Tip>
+  If you need a non-identifier setting available **at build time**, expose it under an identifier-safe alias (e.g. `ES_DISCOVERY_SEED_HOSTS`) and reference that in your Dockerfile or build script.
+</Tip>
