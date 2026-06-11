@@ -212,9 +212,6 @@ case "$ARCH" in
     ;;
 esac
 
-# Parse BUILD_VARS JSON into --build-arg flags and collect values for masking
-build_arg_flags_from_build_vars
-
 # Forward ssh-agent socket to buildx when entrypoint set one up
 SSH_FLAGS=()
 if [ -n "$SSH_AUTH_SOCK" ] && [ -S "$SSH_AUTH_SOCK" ]; then
@@ -386,6 +383,11 @@ source "$BUILDPACK_DIR/lib/elixir.sh"
 source "$BUILDPACK_DIR/lib/deno.sh"
 source "$BUILDPACK_DIR/lib/bun.sh"
 source "$BUILDPACK_DIR/lib/buildpacks.sh"
+
+# Parse BUILD_VARS JSON into --build-arg flags and collect values for masking.
+# Must run AFTER the sources above: the guard inside uses
+# is_valid_build_arg_name + warning from lib/common.sh.
+build_arg_flags_from_build_vars
 
 # Handle build failure - write result and exit
 # If RESULT_FILE is set, exit 0 for Shipwright post-build callbacks
