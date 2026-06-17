@@ -69,6 +69,17 @@ build_meta_label_flags '{"language":"ruby"}'
 assert "label: empty meta yields no revision" \
   '! printf "%s\n" "${BUILD_LABEL_FLAGS[@]}" | grep -q "image.revision"'
 
+# --- build_meta_arg_flags ---
+build_meta_arg_flags '{"commit":"AAA","commit_short":"AAA1234","branch":"main","language":"ruby"}'
+ARGS_JOINED="$(printf '%s\n' "${BUILD_META_ARG_FLAGS[@]}")"
+assert "arg: MIGET_GIT_COMMIT present" \
+  'printf "%s" "$ARGS_JOINED" | grep -q "MIGET_GIT_COMMIT=AAA"'
+assert "arg: MIGET_LANGUAGE present" \
+  'printf "%s" "$ARGS_JOINED" | grep -q "MIGET_LANGUAGE=ruby"'
+build_meta_arg_flags '{"language":"go"}'
+assert "arg: missing commit skipped" \
+  '! printf "%s\n" "${BUILD_META_ARG_FLAGS[@]}" | grep -q "MIGET_GIT_COMMIT="'
+
 # --- stage_build_json ---
 TMPCTX="$(mktemp -d)"; TMPDF="$(mktemp)"
 stage_build_json "$TMPDF" "$TMPCTX" '{"commit":"AAA","language":"ruby"}'

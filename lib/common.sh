@@ -154,6 +154,28 @@ build_meta_label_flags() {
   return 0
 }
 
+# Fill BUILD_META_ARG_FLAGS with MIGET_* --build-arg pairs from a build-meta
+# JSON object ($1), for Dockerfile/Compose opt-in. Empty values are skipped.
+build_meta_arg_flags() {
+  local meta="$1"
+  BUILD_META_ARG_FLAGS=()
+  [ -z "$meta" ] && return 0
+  local pairs=(
+    "commit:MIGET_GIT_COMMIT" "commit_short:MIGET_GIT_COMMIT_SHORT"
+    "branch:MIGET_GIT_BRANCH" "description:MIGET_GIT_DESCRIPTION"
+    "committed_at:MIGET_GIT_COMMITTED_AT" "repository:MIGET_GIT_REPOSITORY"
+    "built_at:MIGET_BUILD_AT" "builder_version:MIGET_BUILDER_VERSION"
+    "language:MIGET_LANGUAGE"
+  )
+  local pair key argname val
+  for pair in "${pairs[@]}"; do
+    key="${pair%%:*}"; argname="${pair#*:}"
+    val=$(printf '%s' "$meta" | jq -r --arg k "$key" '.[$k] // empty')
+    [ -n "$val" ] && BUILD_META_ARG_FLAGS+=(--build-arg "$argname=$val")
+  done
+  return 0
+}
+
 # Stage /.miget/build.json into the image via the build context. COPY works on
 # distroless (DHI) too, unlike RUN. No-op when meta is empty or the context is
 # read-only (a `-v src:ro` mount); labels + result.json still carry the data.
