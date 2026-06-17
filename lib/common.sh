@@ -43,6 +43,27 @@ is_valid_build_arg_name() {
   [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
 }
 
+# Normalize a git repository reference to a canonical https URL:
+#   - convert scp-style git@host:org/repo to https://host/org/repo
+#   - strip a leading ssh:// or git@
+#   - strip embedded credentials (https://user:pass@host/... -> https://host/...)
+#   - ensure an https scheme
+#   - strip a trailing ".git"
+# Empty input yields empty output.
+normalize_git_repository() {
+  local url="$1"
+  [ -z "$url" ] && return 0
+  if [[ "$url" =~ ^[A-Za-z0-9._-]+@([A-Za-z0-9._-]+):(.+)$ ]]; then
+    url="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  fi
+  url="${url#ssh://}"
+  url="${url#git@}"
+  url="$(printf '%s' "$url" | sed -E 's#^(https?://)[^@/]+@#\1#')"
+  [[ "$url" =~ ^https?:// ]] || url="https://$url"
+  url="${url%.git}"
+  printf '%s' "$url"
+}
+
 # Detect language
 detect_language() {
   local build_dir=$1
