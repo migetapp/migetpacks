@@ -69,3 +69,65 @@ detect_language() {
   local build_dir=$1
   "$BUILDPACK_DIR/bin/detect" "$build_dir" 2>/dev/null || echo ""
 }
+
+# Resolve one build-meta field by precedence:
+#   1. the BUILD_META JSON envelope ($2), keyed by $1
+#   2. a direct environment variable named $3
+#   3. a git fallback value ($4)
+# Echoes the first non-empty source (or empty).
+resolve_meta_field() {
+  local key="$1" envelope="$2" env_name="$3" git_value="$4" v=""
+  if [ -n "$envelope" ] && [ "$envelope" != "{}" ]; then
+    v=$(printf '%s' "$envelope" | jq -r --arg k "$key" '.[$k] // empty')
+  fi
+  if [ -z "$v" ] && [ -n "$env_name" ]; then
+    v="${!env_name}"
+  fi
+  [ -z "$v" ] && v="$git_value"
+  printf '%s' "$v"
+}
+
+# Gather build metadata into a compact JSON object on stdout. Precedence per
+# field: $BUILD_META envelope, then MIGET_GIT_*/SOURCE_VERSION env, then git in
+# $1. Builder-known fields are passed in ($2 built_at, $3 builder_version,
+# $4 language). Empty fields are omitted. All git calls are guarded.
+gather_build_meta() {
+  local src_dir="$1" built_at="$2" builder_version="$3" language="$4"
+  local envelope="${BUILD_META:-}"
+  local g_commit="" g_branch="" g_desc="" g_committed="" g_repo=""
+
+  if [ -d "$src_dir/.git" ] && command -v git >/dev/null 2>&1; then
+    g_commit=$(git -C "$src_dir" rev-parse HEAD 2>/dev/null || true)
+    g_branch=$(git -C "$src_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    [ "$g_branch" = "HEAD" ] && g_branch=""
+    g_desc=$(git -C "$src_dir" log -1 --pretty=%s 2>/dev/null || true)
+    g_committed=$(git -C "$src_dir" log -1 --date=format:'%Y-%m-%dT%H:%M:%SZ' --pretty=%cd 2>/dev/null || true)
+    g_repo=$(normalize_git_repository "$(git -C "$src_dir" remote get-url origin 2>/dev/null || true)")
+  fi
+
+  local commit branch desc committed repo
+  commit=$(resolve_meta_field commit "$envelope" MIGET_GIT_COMMIT "$g_commit")
+  [ -z "$commit" ] && commit="${SOURCE_VERSION:-}"
+  branch=$(resolve_meta_field branch "$envelope" MIGET_GIT_BRANCH "$g_branch")
+  desc=$(resolve_meta_field description "$envelope" MIGET_GIT_DESCRIPTION "$g_desc")
+  committed=$(resolve_meta_field committed_at "$envelope" MIGET_GIT_COMMITTED_AT "$g_committed")
+  repo=$(resolve_meta_field repository "$envelope" MIGET_GIT_REPOSITORY "$g_repo")
+
+  local commit_short=""
+  [ -n "$commit" ] && commit_short="${commit:0:7}"
+
+  jq -nc \
+    --arg commit "$commit" \
+    --arg commit_short "$commit_short" \
+    --arg branch "$branch" \
+    --arg description "$desc" \
+    --arg committed_at "$committed" \
+    --arg built_at "$built_at" \
+    --arg builder_version "$builder_version" \
+    --arg language "$language" \
+    --arg repo "$repo" \
+    '{commit:$commit, commit_short:$commit_short, branch:$branch,
+      description:$description, committed_at:$committed_at, built_at:$built_at,
+      builder_version:$builder_version, language:$language, repository:$repo}
+     | with_entries(select(.value != ""))'
+}
