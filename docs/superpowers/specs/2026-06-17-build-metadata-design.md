@@ -131,12 +131,16 @@ SDKs and Heroku-era initializers that read `HEROKU_SLUG_COMMIT` work with no cod
 (`DYNO=miget` already exists in the runtime Dockerfile — `bin/build:2221` — so Heroku mimicry is
 established precedent.)
 
-**Important — the toggle is a control-plane app setting, not a runtime env var.** Because the
-`MIGET_*` namespace is reserved and stripped from the user env channel (specs 2d/3a), the compat
-flag cannot itself be a user-typed `MIGET_HEROKU_COMPAT` runtime env var — that would be rejected.
-It travels the same control-plane channel the daemon already uses for `app_name`/`app_id` (an app
-flag/annotation set platform-side), so it is not subject to, and does not contradict, the
-reserved-namespace strip. It is never injected into the container as an env var itself.
+**The toggle is the one user-settable `MIGET_*` key — recognized as a control flag, not a runtime
+env var.** `MIGET_HEROKU_COMPAT` is the single exception to the reserved-namespace strip (specs
+2d/3a). A user may set it in the UI env list **or** in a Compose service's `environment:`.
+Wherever the reserved-namespace filter runs, this one key is **special-cased**: instead of being
+dropped like every other `MIGET_*` key, it is **extracted** (enabling `HEROKU_*` alias injection
+for that app/service) and then **consumed** — it is **not** passed through into the container.
+Every other `MIGET_*` user key is still rejected. Result: inside the container, the user sees the
+platform-managed `MIGET_*` build metadata and the `HEROKU_*` aliases, but never
+`MIGET_HEROKU_COMPAT` itself — so the invariant "every `MIGET_*` var present at runtime is
+platform-managed" holds.
 
 ## How an app reads it
 
@@ -201,8 +205,8 @@ page documenting the `MIGET_*` vars, `/.miget/build.json`, labels, and `MIGET_HE
 
 **2a. Read + map.** In `lib/k8s/builds/handlers.py` build-completed handler (~`:441`), read
 `build_result.get("build", {})`, map to the `MIGET_*` dict (+ `HEROKU_*` when the app's heroku-compat
-flag is set, read from the control-plane channel — see Heroku compatibility aliases), and add
-`MIGET_APP_NAME`/`MIGET_APP_ID` from the existing deploy
+flag is on — the flag is derived by extracting `MIGET_HEROKU_COMPAT` from the user env in 2d/3a;
+see Heroku compatibility aliases), and add `MIGET_APP_NAME`/`MIGET_APP_ID` from the existing deploy
 context. Omit keys whose source value is missing.
 
 **2b. Inject via dedicated ConfigMap (decision A).** Create/replace an `<app>-build` ConfigMap
@@ -215,16 +219,23 @@ existing `<app>-env` secret (`handlers.py:586-594`).
 **2c. Do not echo to Rails.** Do **not** call `send_var_detected` (`handlers.py:49`) for these.
 They must never appear in the UI env list — they are platform-managed, not user config.
 
-**2d. Reserved-namespace strip.** Before applying user env to the runtime (app.json
-`build_result["env"]` at `handlers.py:510`, and any Rails-pushed env-update path), drop any key
-matching `^MIGET_`. Log dropped keys. Prevents apps from spoofing/overriding build metadata.
+**2d. Reserved-namespace strip (with the one compat exception).** Before applying user env to the
+runtime (app.json `build_result["env"]` at `handlers.py:510`, the Compose service-env path, and
+any Rails-pushed env-update path), handle `MIGET_*` user keys:
+- `MIGET_HEROKU_COMPAT` → **extract** as the app/service heroku-compat flag (consumed by 2a),
+  then **drop** from the runtime passthrough (not injected into the container).
+- every other `^MIGET_` key → **drop** and log.
+
+Prevents apps from spoofing/overriding build metadata while still letting the user toggle compat.
 
 ### 3. miget-kube-api (namespace guard — checkout a branch if changes needed)
 
 **3a.** Extend the existing reserved-prefix guard in `parse_push_options_header`
-(`builds_trigger.py:801`) to also reject keys starting with `MIGET_`, mirroring the `BUILD_VAR_`
-rule. If any other path lets user-defined env reach the app-env channel, apply the same filter
-there. This is the outermost gate; 2d is defense-in-depth.
+(`builds_trigger.py:801`) to reject keys starting with `MIGET_`, mirroring the `BUILD_VAR_` rule —
+**except** `MIGET_HEROKU_COMPAT`, which is allowed through (or extracted as the compat flag) rather
+than rejected, since it is the user-facing toggle. If any other path lets user-defined env reach
+the app-env channel, apply the same rule there. This is the outermost gate; 2d is
+defense-in-depth and performs the final extract-then-strip before runtime injection.
 
 ## Edge cases & error handling
 
@@ -252,8 +263,10 @@ there. This is the outermost gate; 2d is defense-in-depth.
 - **daemon** (`tests/`): given a `build_result` with a `build` block, assert the `<app>-build`
   ConfigMap is created with the mapped `MIGET_*` keys, the second `envFrom` is baked into pod
   templates, `HEROKU_*` appears only when compat is on, `send_var_detected` is **not** called for
-  `MIGET_*`, and user `MIGET_*` keys are stripped.
-- **kube-api** (`tests/`): `parse_push_options_header` rejects `MIGET_*` keys.
+  `MIGET_*`, user `MIGET_*` keys are stripped, and `MIGET_HEROKU_COMPAT` is extracted as the compat
+  flag (enabling `HEROKU_*`) yet not injected into the container.
+- **kube-api** (`tests/`): `parse_push_options_header` rejects `MIGET_*` keys **except**
+  `MIGET_HEROKU_COMPAT`, which is allowed through / extracted.
 
 ## Open questions
 
