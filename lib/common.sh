@@ -131,3 +131,25 @@ gather_build_meta() {
       builder_version:$builder_version, language:$language, repository:$repo}
      | with_entries(select(.value != ""))'
 }
+
+# Fill the BUILD_LABEL_FLAGS array with OCI + miget --label pairs from a
+# build-meta JSON object ($1). Labels with empty values are skipped.
+build_meta_label_flags() {
+  local meta="$1"
+  BUILD_LABEL_FLAGS=()
+  [ -z "$meta" ] && return 0
+  local commit branch desc repo built builder
+  commit=$(printf '%s' "$meta" | jq -r '.commit // empty')
+  branch=$(printf '%s' "$meta" | jq -r '.branch // empty')
+  desc=$(printf '%s' "$meta" | jq -r '.description // empty')
+  repo=$(printf '%s' "$meta" | jq -r '.repository // empty')
+  built=$(printf '%s' "$meta" | jq -r '.built_at // empty')
+  builder=$(printf '%s' "$meta" | jq -r '.builder_version // empty')
+  [ -n "$commit" ]  && BUILD_LABEL_FLAGS+=(--label "org.opencontainers.image.revision=$commit")
+  [ -n "$repo" ]    && BUILD_LABEL_FLAGS+=(--label "org.opencontainers.image.source=$repo")
+  [ -n "$built" ]   && BUILD_LABEL_FLAGS+=(--label "org.opencontainers.image.created=$built")
+  [ -n "$branch" ]  && BUILD_LABEL_FLAGS+=(--label "com.miget.git.branch=$branch")
+  [ -n "$desc" ]    && BUILD_LABEL_FLAGS+=(--label "com.miget.git.description=$desc")
+  [ -n "$builder" ] && BUILD_LABEL_FLAGS+=(--label "com.miget.builder.version=$builder")
+  return 0
+}

@@ -1006,8 +1006,10 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
 
   # Run build and show output directly (no buffering)
   BUILD_OUTPUT=$(mktemp)
+  ensure_build_meta_json "dockerfile"
+  build_meta_label_flags "$BUILD_META_JSON"
   build_latest_tag_flag "$OUTPUT_IMAGE"
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -1123,8 +1125,10 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
 
     # Build the service (resolve context relative to source directory)
     FULL_BUILD_CONTEXT="$EFFECTIVE_SOURCE_DIR/$BUILD_CONTEXT"
+    ensure_build_meta_json "compose"
+    build_meta_label_flags "$BUILD_META_JSON"
     build_latest_tag_flag "$SERVICE_IMAGE"
-    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" \
+    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" \
         -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
         -t "$SERVICE_IMAGE" $LATEST_TAG_FLAG --push \
         "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
@@ -2372,8 +2376,10 @@ if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
   info "Build args: $(echo "$BUILD_VARS" | jq -r 'keys | map(sub("^BUILD_VAR_"; "")) | join(", ")')"
 fi
 
+ensure_build_meta_json "$LANG_NORMALIZED"
+build_meta_label_flags "$BUILD_META_JSON"
 build_latest_tag_flag "$OUTPUT_IMAGE"
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then

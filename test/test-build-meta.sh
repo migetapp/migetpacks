@@ -56,6 +56,19 @@ assert "gather: bare omits commit" \
 assert "gather: bare keeps language" \
   '[ "$(printf "%s" "$BARE_OUT" | jq -r .language)" = "nodejs" ]'
 
+# --- build_meta_label_flags ---
+build_meta_label_flags '{"commit":"AAA","repository":"https://github.com/acme/my-api","built_at":"T","builder_version":"0.0.264","branch":"main"}'
+LABELS_JOINED="$(printf '%s\n' "${BUILD_LABEL_FLAGS[@]}")"
+assert "label: revision present" \
+  'printf "%s" "$LABELS_JOINED" | grep -q "org.opencontainers.image.revision=AAA"'
+assert "label: source present" \
+  'printf "%s" "$LABELS_JOINED" | grep -q "org.opencontainers.image.source=https://github.com/acme/my-api"'
+assert "label: branch present" \
+  'printf "%s" "$LABELS_JOINED" | grep -q "com.miget.git.branch=main"'
+build_meta_label_flags '{"language":"ruby"}'
+assert "label: empty meta yields no revision" \
+  '! printf "%s\n" "${BUILD_LABEL_FLAGS[@]}" | grep -q "image.revision"'
+
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"
 [ "$TESTS_FAILED" -eq 0 ]
