@@ -9,8 +9,9 @@
 |------|------|--------|
 | `migetpacks` | producer of git provenance | `feature/build-metadata` (new) |
 | `migets-k8s-daemon` | consumer / env injector | `feature/compose-part2` (existing — work here) |
-| `migetapp` (Rails) | identity + git inputs | `feature/introduce-compose-stacks` (existing — work here) |
+| `migetapp` (Rails) | identity + git inputs | `feature/introduce-compose-stacks` (existing, work here) |
 | `miget-kube-api` | namespace guard | `feature/build-metadata` (new) |
+| `miget-mintlify` | docs.miget.com user docs | `feature/build-metadata` (new) |
 
 ## Problem
 
@@ -239,8 +240,12 @@ to `Dockerfile` and `Dockerfile.alpine`, and pass `--build-arg MIGETPACKS_VERSIO
 `.github/workflows/release.yml`. `bin/build` reads `$MIGETPACKS_VERSION` (omit field if unset, e.g.
 local dev image).
 
-**1g. Docs.** Update `docs/reference/result-json.mdx` (new `build` block), add a "Build Metadata"
-page documenting the `MIGET_*` vars, `/.miget/build.json`, labels, and `MIGET_HEROKU_COMPAT`.
+**1g. Docs (migetpacks repo `docs/`).** Update `docs/reference/result-json.mdx` (new `build`
+block). Add a "Build Metadata" page documenting the `MIGET_*` vars, `/.miget/build.json`, OCI
+labels, the `build-meta` input envelope, and `MIGET_HEROKU_COMPAT`. Cross-link from
+`docs/configuration/environment-variables.mdx`. Follow `docs/CLAUDE.md` (Mintlify): frontmatter
+(title + description), second-person voice, relative internal links, language tags on code blocks,
+match existing page style. **No em-dashes, no AI slop** — plain, concrete sentences, real examples.
 
 ### 2. migets-k8s-daemon (consumer — branch `feature/compose-part2`)
 
@@ -340,6 +345,26 @@ deploy context. Optional — omit to ship without release parity initially.
 **4e. Reserved namespace in the UI.** The env-var editor must reject/hide user-entered `MIGET_*`
 keys (except the compat toggle, which is its own setting), matching the kube-api (3a) and daemon
 (2d) guards. Build-metadata vars are never shown as editable config.
+
+### 5. miget-mintlify (docs.miget.com — branch `feature/build-metadata`)
+
+User-facing product docs. Read `miget-mintlify/CLAUDE.md` before editing (Mintlify conventions).
+
+**5a. New page `deployments/build-metadata.mdx`.** Document the `MIGET_*` runtime env vars (table
+with meaning and example), the Heroku-compat toggle and its `HEROKU_*` aliases, `/.miget/build.json`,
+and a short "read it in your app" example for a `/version` endpoint. Place it in the `deployments`
+nav group in `docs.json` (near `using-secrets` / `how-it-works`, around `docs.json:87-104`).
+
+**5b. Cross-link** from `deployments/how-it-works.mdx`, `deployments/using-secrets.mdx`, and
+`deployments/github-integration.mdx` (where commit-based deploys are described).
+
+**5c. Scope note.** This is the user-product view (what vars exist, how to read them). The builder
+internals (`build-meta` envelope, OCI labels, result.json contract) stay in the migetpacks repo docs
+(1g); do not duplicate them here.
+
+**5d. Style.** Follow `CLAUDE.md`: title + description frontmatter, second-person voice, relative
+internal links, language tags on code blocks, smallest reasonable change, match existing pages. **No
+em-dashes, no AI slop.** Plain sentences, concrete examples, no filler adjectives.
 
 ## Edge cases & error handling
 
