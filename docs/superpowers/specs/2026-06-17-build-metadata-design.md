@@ -120,8 +120,16 @@ Mapped 1:1 from the `build` block. Heroku equivalents shown for reference.
 | `MIGET_RELEASE_VERSION` | `release_version` | `HEROKU_RELEASE_VERSION` |
 | `MIGET_RELEASE_CREATED_AT` | `release_created_at` | `HEROKU_RELEASE_CREATED_AT` |
 
-`MIGET_APP_NAME` / `MIGET_APP_ID` come from the daemon's deploy context (it already knows
-`app_name` / `app_id` in `handlers.py`), not from `result.json`.
+`MIGET_APP_NAME` comes from the daemon's deploy context (it already knows `app_name` in
+`handlers.py`), not from `result.json`.
+
+**`MIGET_APP_ID` must be the app UUID — not the DB record id.** Heroku's `HEROKU_APP_ID` is a
+UUID, and a stable opaque identifier is the right contract. The daemon's existing `app_id`
+(`handlers.py:411` ← kube-api annotation `watcher.miget.com/object.id`, `builds_trigger.py:182`)
+is the **DB record id**, so it must **not** be reused for `MIGET_APP_ID`. No app UUID is plumbed
+through kube-api/daemon today (only a *workspace* UUID exists, via `miget.io/workspace-id`). This
+adds a dependency — see "Dependency: app UUID plumbing" below. Until the UUID is wired through,
+**omit `MIGET_APP_ID`** rather than emit the DB record id.
 
 ### Heroku compatibility aliases
 
@@ -206,8 +214,11 @@ page documenting the `MIGET_*` vars, `/.miget/build.json`, labels, and `MIGET_HE
 **2a. Read + map.** In `lib/k8s/builds/handlers.py` build-completed handler (~`:441`), read
 `build_result.get("build", {})`, map to the `MIGET_*` dict (+ `HEROKU_*` when the app's heroku-compat
 flag is on — the flag is derived by extracting `MIGET_HEROKU_COMPAT` from the user env in 2d/3a;
-see Heroku compatibility aliases), and add `MIGET_APP_NAME`/`MIGET_APP_ID` from the existing deploy
-context. Omit keys whose source value is missing.
+see Heroku compatibility aliases), and add `MIGET_APP_NAME` from the existing deploy context
+(`app_name`). For `MIGET_APP_ID`, read `custom_data.get('app_uuid')` (the app UUID — see
+"Dependency: app UUID plumbing"); **do not** use the existing `app_id` (`watcher.miget.com/object.id`,
+the DB record id). Omit any key whose source value is missing — including `MIGET_APP_ID` until the
+UUID is plumbed through.
 
 **2b. Inject via dedicated ConfigMap (decision A).** Create/replace an `<app>-build` ConfigMap
 holding the `MIGET_*` values (non-secret, release-scoped, overwritten wholesale each build —
@@ -228,7 +239,7 @@ any Rails-pushed env-update path), handle `MIGET_*` user keys:
 
 Prevents apps from spoofing/overriding build metadata while still letting the user toggle compat.
 
-### 3. miget-kube-api (namespace guard — checkout a branch if changes needed)
+### 3. miget-kube-api (namespace guard + UUID threading — checkout a branch if changes needed)
 
 **3a.** Extend the existing reserved-prefix guard in `parse_push_options_header`
 (`builds_trigger.py:801`) to reject keys starting with `MIGET_`, mirroring the `BUILD_VAR_` rule —
@@ -236,6 +247,28 @@ Prevents apps from spoofing/overriding build metadata while still letting the us
 than rejected, since it is the user-facing toggle. If any other path lets user-defined env reach
 the app-env channel, apply the same rule there. This is the outermost gate; 2d is
 defense-in-depth and performs the final extract-then-strip before runtime injection.
+
+**3b. App UUID threading (for `MIGET_APP_ID`).** Thread the app UUID from the build-trigger
+payload through `custom_data` (`custom_data['app_uuid']`) in `builds_trigger.py`, alongside the
+existing `app_id`. See "Dependency: app UUID plumbing". Depends on Rails passing the UUID; if it
+is not yet available, this sub-task and `MIGET_APP_ID` ship in a follow-up.
+
+## Dependency: app UUID plumbing (for `MIGET_APP_ID`)
+
+`MIGET_APP_ID` requires a stable app **UUID** that does not exist in the kube-api/daemon layer
+today. Wiring it through is a prerequisite for emitting that one var (everything else ships
+without it):
+
+1. **Rails (app.miget.com)** — owns the app's UUID. Add it to the build-trigger payload (e.g.
+   `config['app_uuid']`).
+2. **miget-kube-api** — thread it through `custom_data` (e.g. `custom_data['app_uuid']`) in
+   `builds_trigger.py` (alongside the existing `app_id`), and optionally as a distinct annotation
+   (`watcher.miget.com/object.uuid`) so it is not confused with `object.id`.
+3. **migets-k8s-daemon** — read `custom_data.get('app_uuid')` in `handlers.py` and map it to
+   `MIGET_APP_ID`. If absent, omit the var.
+
+This is the one field gated on a cross-repo prerequisite; the rest of the feature does not depend
+on it. If the UUID work slips, ship `MIGET_APP_ID` in a follow-up.
 
 ## Edge cases & error handling
 
