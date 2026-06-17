@@ -35,6 +35,8 @@ RUN chmod +x /buildpack/bin/* /buildpack/lib/*
 # Set buildpack directory
 ENV BUILDPACK_DIR=/buildpack
 ENV PORT=5000
+ARG MIGETPACKS_VERSION=""
+ENV MIGETPACKS_VERSION=${MIGETPACKS_VERSION}
 
 # Create workspace
 WORKDIR /workspace

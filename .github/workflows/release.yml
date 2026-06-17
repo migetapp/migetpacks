@@ -63,6 +63,8 @@ jobs:
           tags: |
             miget/migetpacks:${{ steps.version.outputs.version }}
             miget/migetpacks:latest
+          build-args: |
+            MIGETPACKS_VERSION=${{ steps.version.outputs.version }}
 
       - name: Build and push alpine image
         uses: docker/build-push-action@v6
@@ -74,6 +76,8 @@ jobs:
           tags: |
             miget/migetpacks:${{ steps.version.outputs.version }}-alpine
             miget/migetpacks:latest-alpine
+          build-args: |
+            MIGETPACKS_VERSION=${{ steps.version.outputs.version }}
 
       - name: Bump version in Makefile
         run: |
