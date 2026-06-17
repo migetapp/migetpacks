@@ -1,4 +1,4 @@
-.PHONY: help build build-alpine push push-alpine test test-detect test-build-vars test-nodejs test-python test-go test-rust test-dotnet clean install
+.PHONY: help build build-alpine push push-alpine test test-detect test-build-vars test-build-meta test-nodejs test-python test-go test-rust test-dotnet clean install
 
 # Variables
 REGISTRY ?= miget
@@ -61,6 +61,10 @@ test-build-vars:
 	@echo "Running build-vars guard tests..."
 	./test/test-build-vars.sh
 
+test-build-meta:
+	@echo "Running build-metadata helper tests..."
+	./test/test-build-meta.sh
+
 test-nodejs:
 	@echo "Testing Node.js build..."
 	docker run --rm \
@@ -106,7 +110,7 @@ test-dotnet:
 		-e OUTPUT_IMAGE=test-dotnet:latest \
 		$(FULL_IMAGE)
 
-test: test-detect test-generate-secret test-build-vars
+test: test-detect test-generate-secret test-build-vars test-build-meta
 	@echo "All tests passed ✓"
 
 clean:
