@@ -2,9 +2,15 @@
 
 **Date:** 2026-06-17
 **Status:** Approved (pending spec review)
-**Repos touched:** `migetpacks` (producer of git provenance), `migetapp`/Rails (identity + git
-inputs, branch `feature/introduce-compose-stacks`), `migets-k8s-daemon` (consumer/injector, branch
-`feature/compose-part2`), `miget-kube-api` (namespace guard)
+
+**Repos & implementation branches:**
+
+| Repo | Role | Branch |
+|------|------|--------|
+| `migetpacks` | producer of git provenance | `feature/build-metadata` (new) |
+| `migets-k8s-daemon` | consumer / env injector | `feature/compose-part2` (existing — work here) |
+| `migetapp` (Rails) | identity + git inputs | `feature/introduce-compose-stacks` (existing — work here) |
+| `miget-kube-api` | namespace guard | `feature/build-metadata` (new) |
 
 ## Problem
 
