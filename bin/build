@@ -2378,6 +2378,7 @@ fi
 
 ensure_build_meta_json "$LANG_NORMALIZED"
 build_meta_label_flags "$BUILD_META_JSON"
+stage_build_json "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_META_JSON"
 build_latest_tag_flag "$OUTPUT_IMAGE"
 docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}

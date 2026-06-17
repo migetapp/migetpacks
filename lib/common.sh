@@ -153,3 +153,28 @@ build_meta_label_flags() {
   [ -n "$builder" ] && BUILD_LABEL_FLAGS+=(--label "com.miget.builder.version=$builder")
   return 0
 }
+
+# Stage /.miget/build.json into the image via the build context. COPY works on
+# distroless (DHI) too, unlike RUN. No-op when meta is empty or the context is
+# read-only (a `-v src:ro` mount); labels + result.json still carry the data.
+stage_build_json() {
+  local dockerfile="$1" ctx="$2" meta="$3"
+  { [ -z "$meta" ] || [ "$meta" = "{}" ]; } && return 0
+  if ! ( : > "$ctx/.miget-build.json" ) 2>/dev/null; then
+    warning "Build context read-only; skipping /.miget/build.json (labels + result.json still set)"
+    return 0
+  fi
+  printf '%s' "$meta" > "$ctx/.miget-build.json"
+  # A user or generated .dockerignore could exclude the staged file and make the
+  # COPY below fail; a trailing negation re-includes it (last match wins).
+  if [ -f "$ctx/.dockerignore" ]; then
+    grep -qxF '!.miget-build.json' "$ctx/.dockerignore" 2>/dev/null || \
+      echo '!.miget-build.json' >> "$ctx/.dockerignore"
+  fi
+  {
+    echo ""
+    echo "# Build metadata (miget)"
+    echo "COPY --chmod=0644 .miget-build.json /.miget/build.json"
+  } >> "$dockerfile"
+  return 0
+}

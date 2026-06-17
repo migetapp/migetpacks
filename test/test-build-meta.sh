@@ -69,6 +69,26 @@ build_meta_label_flags '{"language":"ruby"}'
 assert "label: empty meta yields no revision" \
   '! printf "%s\n" "${BUILD_LABEL_FLAGS[@]}" | grep -q "image.revision"'
 
+# --- stage_build_json ---
+TMPCTX="$(mktemp -d)"; TMPDF="$(mktemp)"
+stage_build_json "$TMPDF" "$TMPCTX" '{"commit":"AAA","language":"ruby"}'
+assert "stage: context file written" \
+  '[ "$(jq -r .commit "$TMPCTX/.miget-build.json")" = "AAA" ]'
+assert "stage: COPY line appended" \
+  'grep -q "COPY --chmod=0644 .miget-build.json /.miget/build.json" "$TMPDF"'
+TMPDF2="$(mktemp)"
+stage_build_json "$TMPDF2" "$TMPCTX" '{}'
+assert "stage: empty meta is no-op" \
+  '[ ! -s "$TMPDF2" ]'
+rm -rf "$TMPCTX" "$TMPDF" "$TMPDF2"
+
+# --- stage_build_json re-includes via .dockerignore ---
+TMPCTX2="$(mktemp -d)"; TMPDF3="$(mktemp)"; printf '*\n' > "$TMPCTX2/.dockerignore"
+stage_build_json "$TMPDF3" "$TMPCTX2" '{"commit":"AAA"}'
+assert "stage: appends dockerignore negation" \
+  'grep -qxF "!.miget-build.json" "$TMPCTX2/.dockerignore"'
+rm -rf "$TMPCTX2" "$TMPDF3"
+
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"
 [ "$TESTS_FAILED" -eq 0 ]
