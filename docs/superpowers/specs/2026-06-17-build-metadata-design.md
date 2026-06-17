@@ -191,9 +191,14 @@ platform-managed" holds.
 ### 1. migetpacks (producer — this repo)
 
 **1a. Gather metadata (model C).** New function in `bin/build` (or `lib/common.sh`), called
-early — **before** the runtime `.git` cleanup. Precedence per field: explicit platform input
-(`MIGET_GIT_COMMIT` / `SOURCE_VERSION` / `MIGET_*` env, and `BUILD_VARS` envelope) wins;
-otherwise fall back to `git -C "$EFFECTIVE_SOURCE_DIR" …` when `.git` is present. Guard every
+early — **before** the runtime `.git` cleanup. Precedence per field, highest first:
+1. The **`$BUILD_META` envelope** (the new Shipwright `build-meta` param — see "Provenance channel";
+   parsed exactly like the existing `$BUILD_VARS`). The platform path.
+2. Direct `MIGET_GIT_*` / `SOURCE_VERSION` env vars — a convenience for standalone `docker run` /
+   GitHub Actions users who have no Shipwright envelope.
+3. `git -C "$EFFECTIVE_SOURCE_DIR" …` autodetection when `.git` is present.
+
+Normalize `repository` to a full HTTPS URL in the fallback (see "`repository` format"). Guard every
 git call: shallow clones, tarball sources, and detached HEAD must degrade to "field omitted",
 never error. Store gathered values in a single JSON blob (`BUILD_META_JSON`) reused by all
 surfaces.
@@ -278,6 +283,13 @@ provenance*. (Annotations on the app's Deployment, mirroring the existing
 `watcher.miget.com/object.id`, are an acceptable alternative carrier; a ConfigMap is preferred for
 holding several keys.)
 
+**2f. Assemble the `build-meta` param (build-trigger side).** When constructing the BuildRun
+(`lib/k8s/builds/shipwright.py`, alongside the existing `build-vars` at `:247-250`), add a
+`build-meta` param: a JSON envelope `{commit, branch, description, committed_at, repository}`. Source
+per deploy method: github/public_git → from the provenance Rails includes in the deploy message;
+git_push → from the daemon's own clone (`lib/git_clone.py`); container_registry → omit. Keep it a
+**distinct** param from `build-vars` so it never mixes with the user app-env channel.
+
 ### 3. miget-kube-api (namespace guard — checkout a branch if changes needed)
 
 **3a.** Extend the existing reserved-prefix guard in `parse_push_options_header`
@@ -304,9 +316,11 @@ container registry," since identity is registered once at app creation, not per 
 **4b. Git provenance as build input (model C platform side).** Rails already snapshots commit data
 in `deployment_config` — `last_deployed_commit_sha` / `last_commit_message` / `last_commit_author`
 / `last_commit_timestamp` / `repository` (`app/services/apps/deploy.rb:48-114`) and the branch.
-For `github`/`public_git` deploys, pass these to the build as the platform-authoritative `MIGET_*`
-git inputs (model C: they win over `.git` autodetection in migetpacks). `git_push` (Gitea)
-provenance comes from the push/clone; `container_registry` has no commit (git fields omitted).
+For `github`/`public_git` deploys, include these in the **deploy message** so the daemon fills the
+`build-meta` param (2f) — the platform-authoritative source that wins over `.git` autodetection in
+migetpacks. Send `repository` as the full HTTPS URL via the existing `repository_url` helper
+(`deployment_configs/github.rb:64`). `git_push` (Gitea) provenance is filled daemon-side from the
+clone; `container_registry` has no commit (git fields omitted).
 
 **4c. Heroku-compat toggle (UI).** Surface the per-app `heroku_compat` setting in app settings. It
 is **not** a user-typed `MIGET_*` env var (those are reserved/stripped) — it is a first-class app
@@ -357,12 +371,41 @@ keys (except the compat toggle, which is its own setting), matching the kube-api
   provenance is passed as `MIGET_*` build inputs for github/public_git deploys; the env-var editor
   rejects user-entered `MIGET_*` keys.
 
+## Resolved decisions (formerly open questions)
+
+### `repository` format → full HTTPS URL
+
+Surface `repository` as `https://<host>/<owner>/<repo>` (e.g. `https://github.com/acme/my-api`),
+**not** the bare `owner/repo`. This is the OCI convention for `org.opencontainers.image.source` (a
+fetchable URL) and the value GitHub/GHCR read to auto-link an image to its repo. Rails already has
+the helper: `deployment_configs/github.rb:64` `repository_url` = `"https://github.com/#{repository}"`
+(`repository` is stored as `owner/repo`, `github.rb:4`). Normalization (Rails for
+github/public_git; migetpacks for the `.git` fallback): strip `.git`, strip embedded credentials,
+convert `git@host:org/repo` → `https://host/org/repo`. Gitea (`git_push`) uses its own host URL.
+
+### Provenance channel → dedicated `build-meta` Shipwright param (JSON envelope)
+
+migetpacks receives git provenance through a **new Shipwright param `build-meta`**, parallel to the
+existing `build-vars` (`shipwright.py:247-250`):
+
+```
+build-meta = {"commit": "...", "branch": "...", "description": "...",
+              "committed_at": "...", "repository": "https://github.com/acme/my-api"}
+```
+
+migetpacks reads it as `$BUILD_META` (exactly as it already reads `$BUILD_VARS`) and uses it as the
+model-C **platform-input** source — highest precedence, `.git` autodetection below it. Rationale:
+- A **separate envelope from `build-vars`** makes it a platform-internal channel, distinct from the
+  user app-env channel. The reserved-namespace guards (2d/3a) protect the *user* channel only, so
+  there is **no collision and no spoofing** — users cannot write into `build-meta` (daemon-assembled
+  server-side).
+- **Not `custom-data`**: that is an opaque daemon round-trip blob echoed back to
+  `result.json.custom`; overloading it with inputs migetpacks must parse couples unrelated concerns.
+- **Assembly per method:** github/public_git → Rails passes provenance in the deploy message → the
+  daemon fills `build-meta`. git_push → the daemon already clones (`lib/git_clone.py`) and fills
+  `build-meta` from the clone. container_registry → omitted (no git).
+
 ## Open questions
 
-None blocking.
-- `repository` URL format (`github.com/org/repo` vs full clone URL) — finalize against what Rails
-  stores in `deployment_config.repository`; normalize to host/org/repo for labels.
-- Exact channel Rails uses to pass git provenance to the build as `MIGET_*` inputs (push-options vs
-  a dedicated build-config field) — resolve in the migetapp/kube-api implementation plan; the
-  reserved-namespace guards (2d/3a) must allow the platform-internal channel while rejecting
-  user-typed `MIGET_*`.
+None blocking. (Optional future nicety: a `MIGET_GIT_COMMIT_URL` derived from Rails' existing
+`commit_url` helper — deferred, YAGNI.)
