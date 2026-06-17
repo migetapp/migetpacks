@@ -30,8 +30,8 @@ assert "empty stays empty" \
   '[ -z "$(normalize_git_repository "")" ]'
 
 # --- resolve_meta_field precedence ---
-assert "envelope wins over env+git" \
-  '[ "$(BUILD_X='\''{"commit":"AAA"}'\''; resolve_meta_field commit "{\"commit\":\"AAA\"}" MIGET_GIT_COMMIT gitval)" = "AAA" ]'
+assert "envelope wins over populated env" \
+  '[ "$(MIGET_GIT_COMMIT=ENVVAL resolve_meta_field commit "{\"commit\":\"AAA\"}" MIGET_GIT_COMMIT gitval)" = "AAA" ]'
 assert "env used when envelope empty" \
   '[ "$(MIGET_GIT_COMMIT=BBB resolve_meta_field commit "{}" MIGET_GIT_COMMIT gitval)" = "BBB" ]'
 assert "git fallback when both empty" \
@@ -92,6 +92,18 @@ stage_build_json "$TMPDF2" "$TMPCTX" '{}'
 assert "stage: empty meta is no-op" \
   '[ ! -s "$TMPDF2" ]'
 rm -rf "$TMPCTX" "$TMPDF" "$TMPDF2"
+
+# --- SOURCE_VERSION as env-tier alias for commit ---
+# SOURCE_VERSION is an env-tier alias for commit, ABOVE .git autodetection
+SV_OUT="$(SOURCE_VERSION=ccccccc1234 gather_build_meta /nonexistent 2026-06-17T20:00:00Z 0.0.264 ruby)"
+assert "gather: SOURCE_VERSION sets commit" \
+  '[ "$(printf "%s" "$SV_OUT" | jq -r .commit)" = "ccccccc1234" ]'
+assert "gather: SOURCE_VERSION drives commit_short" \
+  '[ "$(printf "%s" "$SV_OUT" | jq -r .commit_short)" = "ccccccc" ]'
+# MIGET_GIT_COMMIT outranks SOURCE_VERSION
+MG_OUT="$(MIGET_GIT_COMMIT=mmmmmmm SOURCE_VERSION=ccccccc gather_build_meta /nonexistent 2026-06-17T20:00:00Z 0.0.264 ruby)"
+assert "gather: MIGET_GIT_COMMIT outranks SOURCE_VERSION" \
+  '[ "$(printf "%s" "$MG_OUT" | jq -r .commit)" = "mmmmmmm" ]'
 
 # --- stage_build_json re-includes via .dockerignore ---
 TMPCTX2="$(mktemp -d)"; TMPDF3="$(mktemp)"; printf '*\n' > "$TMPCTX2/.dockerignore"

@@ -106,8 +106,10 @@ gather_build_meta() {
   fi
 
   local commit branch desc committed repo
-  commit=$(resolve_meta_field commit "$envelope" MIGET_GIT_COMMIT "$g_commit")
-  [ -z "$commit" ] && commit="${SOURCE_VERSION:-}"
+  # commit precedence: envelope -> MIGET_GIT_COMMIT or SOURCE_VERSION (env tier) -> .git
+  commit=$(printf '%s' "$envelope" | jq -r 'if type=="object" then (.commit // empty) else empty end' 2>/dev/null)
+  [ -z "$commit" ] && commit="${MIGET_GIT_COMMIT:-${SOURCE_VERSION:-}}"
+  [ -z "$commit" ] && commit="$g_commit"
   branch=$(resolve_meta_field branch "$envelope" MIGET_GIT_BRANCH "$g_branch")
   desc=$(resolve_meta_field description "$envelope" MIGET_GIT_DESCRIPTION "$g_desc")
   committed=$(resolve_meta_field committed_at "$envelope" MIGET_GIT_COMMITTED_AT "$g_committed")
