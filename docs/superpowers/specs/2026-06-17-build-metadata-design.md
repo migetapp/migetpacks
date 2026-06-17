@@ -2,7 +2,9 @@
 
 **Date:** 2026-06-17
 **Status:** Approved (pending spec review)
-**Repos touched:** `migetpacks` (producer), `migets-k8s-daemon` (consumer), `miget-kube-api` (namespace guard)
+**Repos touched:** `migetpacks` (producer of git provenance), `migetapp`/Rails (identity + git
+inputs, branch `feature/introduce-compose-stacks`), `migets-k8s-daemon` (consumer/injector, branch
+`feature/compose-part2`), `miget-kube-api` (namespace guard)
 
 ## Problem
 
@@ -36,19 +38,27 @@ the app at runtime — plus to tooling that inspects images without running them
 ## Architecture
 
 ```
+   migetapp (Rails) ── add_app ──► app identity {app_uuid, app_name, heroku_compat}
+          │                              │ (static, once per app — all deploy methods)
+          │ git provenance               ▼
+          │ (github/public_git)   migets-k8s-daemon: persist in <app>-meta ConfigMap
+          ▼
                  ┌─────────────────────── migetpacks (producer) ───────────────────────┐
-   .git/  ─────► │ gather metadata (model C: platform inputs win, .git fallback)        │
+   .git/  ─────► │ gather metadata (model C: platform git inputs win, .git fallback)    │
    platform ───► │   → OCI labels        (all build types)                              │
-   env inputs    │   → result.json.build (all build types)   ◄── the cross-repo contract│
+   git inputs    │   → result.json.build (all build types)   ◄── per-build provenance   │
                  │   → /.miget/build.json (buildpack builds only)                       │
                  │   → MIGET_* build-args (Dockerfile/Compose opt-in)                   │
                  └──────────────────────────────────┬──────────────────────────────────┘
                                                      │ result.json (RabbitMQ build-completed event)
                                                      ▼
                  ┌──────────────── migets-k8s-daemon (consumer) ───────────────────────┐
-                 │ read build_result["build"] → map to MIGET_* (+ HEROKU_* if compat)  │
-                 │ inject via dedicated <app>-build ConfigMap, second envFrom on every  │
-                 │ web/worker/release pod template                                      │
+                 │ compose MIGET_* from THREE sources:                                  │
+                 │   1. result.json.build  → git provenance + builder facts             │
+                 │   2. <app>-meta CM      → app_uuid / app_name / heroku_compat        │
+                 │   3. per-build context  → release_version / release_created_at (opt) │
+                 │ (+ HEROKU_* aliases if compat) → write <app>-build ConfigMap          │
+                 │ second envFrom on every web/worker/release pod template              │
                  │ do NOT send_var_detected (never echoed to Rails / UI)                │
                  │ strip user-supplied MIGET_* from app env paths (reserved namespace)  │
                  └─────────────────────────────────────────────────────────────────────┘
@@ -70,19 +80,21 @@ migetpacks adds a `build` object to the result JSON written by `write_result_fil
 (`bin/build:676`). Present for **all** build types. Fields with unknown values are **omitted**
 (not set to empty string), so a missing key is meaningful.
 
+`result.json.build` carries **per-build git provenance + builder facts only**. App identity and
+release info are *not* here — migetpacks doesn't know them; the daemon adds them at injection time
+from other sources (see "Three sources" below).
+
 ```json
 "build": {
-  "commit":            "9f3c1a7b8e2d4f5a6c7b8e2d4f5a6c7b8e2d4f5a",
-  "commit_short":      "9f3c1a7",
-  "branch":            "main",
-  "description":       "Fix build-vars call order",
-  "committed_at":      "2026-06-17T19:40:00Z",
-  "built_at":          "2026-06-17T20:00:00Z",
-  "builder_version":   "0.0.264",
-  "language":          "ruby",
-  "repository":        "github.com/acme/my-api",
-  "release_version":   "v42",
-  "release_created_at": null
+  "commit":          "9f3c1a7b8e2d4f5a6c7b8e2d4f5a6c7b8e2d4f5a",
+  "commit_short":    "9f3c1a7",
+  "branch":          "main",
+  "description":     "Fix build-vars call order",
+  "committed_at":    "2026-06-17T19:40:00Z",
+  "built_at":        "2026-06-17T20:00:00Z",
+  "builder_version": "0.0.264",
+  "language":        "ruby",
+  "repository":      "github.com/acme/my-api"
 }
 ```
 
@@ -97,39 +109,49 @@ migetpacks adds a `build` object to the result JSON written by `write_result_fil
 | `builder_version` | builder image | see "Builder version" task below |
 | `language` | builder | already computed (`LANG_NORMALIZED`) |
 | `repository` | platform input | omitted if unknown (no reliable `.git` value) |
-| `release_version` | platform input | omitted for standalone `docker run`/CI |
-| `release_created_at` | platform input | omitted if unknown |
+
+Release info (`release_version`, `release_created_at`) and app identity (`app_uuid`, `app_name`)
+are **not** in this block — see the env-var table and "Three sources" below.
 
 ## Runtime env vars (injected by the daemon)
 
 Mapped 1:1 from the `build` block. Heroku equivalents shown for reference.
 
-| Env var | From `build.*` | Heroku equivalent |
-|---------|----------------|-------------------|
-| `MIGET_GIT_COMMIT` | `commit` | `HEROKU_SLUG_COMMIT` |
-| `MIGET_GIT_COMMIT_SHORT` | `commit_short` | — |
-| `MIGET_GIT_BRANCH` | `branch` | — |
-| `MIGET_GIT_DESCRIPTION` | `description` | `HEROKU_SLUG_DESCRIPTION` |
-| `MIGET_GIT_COMMITTED_AT` | `committed_at` | — |
-| `MIGET_GIT_REPOSITORY` | `repository` | — |
-| `MIGET_BUILD_AT` | `built_at` | — |
-| `MIGET_BUILDER_VERSION` | `builder_version` | `STACK` (loosely) |
-| `MIGET_LANGUAGE` | `language` | — |
-| `MIGET_APP_NAME` | platform | `HEROKU_APP_NAME` |
-| `MIGET_APP_ID` | platform | `HEROKU_APP_ID` |
-| `MIGET_RELEASE_VERSION` | `release_version` | `HEROKU_RELEASE_VERSION` |
-| `MIGET_RELEASE_CREATED_AT` | `release_created_at` | `HEROKU_RELEASE_CREATED_AT` |
+| Env var | Source | Heroku equivalent |
+|---------|--------|-------------------|
+| `MIGET_GIT_COMMIT` | `result.json.build.commit` | `HEROKU_SLUG_COMMIT` |
+| `MIGET_GIT_COMMIT_SHORT` | `result.json.build.commit_short` | — |
+| `MIGET_GIT_BRANCH` | `result.json.build.branch` | — |
+| `MIGET_GIT_DESCRIPTION` | `result.json.build.description` | `HEROKU_SLUG_DESCRIPTION` |
+| `MIGET_GIT_COMMITTED_AT` | `result.json.build.committed_at` | — |
+| `MIGET_GIT_REPOSITORY` | `result.json.build.repository` | — |
+| `MIGET_BUILD_AT` | `result.json.build.built_at` | — |
+| `MIGET_BUILDER_VERSION` | `result.json.build.builder_version` | `STACK` (loosely) |
+| `MIGET_LANGUAGE` | `result.json.build.language` | — |
+| `MIGET_APP_NAME` | `<app>-meta` ConfigMap (add_app) | `HEROKU_APP_NAME` |
+| `MIGET_APP_ID` | `<app>-meta` ConfigMap (add_app) — `app.uuid` | `HEROKU_APP_ID` |
+| `MIGET_RELEASE_VERSION` | per-build deploy context (omit if absent) | `HEROKU_RELEASE_VERSION` |
+| `MIGET_RELEASE_CREATED_AT` | per-build deploy context (omit if absent) | `HEROKU_RELEASE_CREATED_AT` |
 
-`MIGET_APP_NAME` comes from the daemon's deploy context (it already knows `app_name` in
-`handlers.py`), not from `result.json`.
+### Three sources the daemon merges
 
-**`MIGET_APP_ID` must be the app UUID — not the DB record id.** Heroku's `HEROKU_APP_ID` is a
-UUID, and a stable opaque identifier is the right contract. The daemon's existing `app_id`
-(`handlers.py:411` ← kube-api annotation `watcher.miget.com/object.id`, `builds_trigger.py:182`)
-is the **DB record id**, so it must **not** be reused for `MIGET_APP_ID`. No app UUID is plumbed
-through kube-api/daemon today (only a *workspace* UUID exists, via `miget.io/workspace-id`). This
-adds a dependency — see "Dependency: app UUID plumbing" below. Until the UUID is wired through,
-**omit `MIGET_APP_ID`** rather than emit the DB record id.
+The daemon composes the `MIGET_*` set at build-completed time from three places, by the *nature*
+of each datum:
+
+1. **`result.json.build`** — *per-build git provenance + builder facts* (commit, branch,
+   description, committed_at, built_at, builder_version, language, repository). Produced by
+   migetpacks; baked into the image's labels and `/.miget/build.json` too.
+2. **`<app>-meta` ConfigMap** — *static per-app identity* (app UUID, app name, heroku-compat flag),
+   written once at **add_app** (see "App identity via add_app"). Read for every build regardless of
+   trigger method (github / public-git push / container registry).
+3. **Per-build deploy context** — *release info* (`release_version`, `release_created_at`), if the
+   trigger supplies it; omitted otherwise. Not static, not git provenance — a deploy counter.
+
+**`MIGET_APP_ID` is the app UUID** (`apps.uuid`, `gen_random_uuid()`, unique — it already exists in
+Rails). It must **not** reuse the daemon's existing `app_id` (`watcher.miget.com/object.id`,
+`builds_trigger.py:182`), which is the **DB record id**. The UUID arrives via `add_app` → source 2,
+so it is available for all deploy methods (this is why identity goes through `add_app`, not the
+per-build trigger). Omit `MIGET_APP_ID` only if `<app>-meta` is somehow absent.
 
 ### Heroku compatibility aliases
 
@@ -184,9 +206,9 @@ merges. Emit it on **success and failure** result files (a failed build still ha
 invocation: the buildpack build (`bin/build:~960`), the Dockerfile build (`bin/build:992`), and
 each Compose service (`bin/build:1109`). Labels:
 `org.opencontainers.image.revision=<commit>`, `…image.source=<repository>`,
-`…image.created=<built_at>`, `…image.version=<release_version>`, plus
-`com.miget.git.branch`, `com.miget.git.description`, `com.miget.builder.version`. Omit any label
-whose value is empty.
+`…image.created=<built_at>`, plus `com.miget.git.branch`, `com.miget.git.description`,
+`com.miget.builder.version`. (No `…image.version` — release_version is deploy context, unknown to
+the builder.) Omit any label whose value is empty.
 
 **1d. `/.miget/build.json` (buildpack builds only).** In the generated runtime Dockerfile,
 before the final `USER` switch, write the blob as root, world-readable:
@@ -211,14 +233,17 @@ page documenting the `MIGET_*` vars, `/.miget/build.json`, labels, and `MIGET_HE
 
 ### 2. migets-k8s-daemon (consumer — branch `feature/compose-part2`)
 
-**2a. Read + map.** In `lib/k8s/builds/handlers.py` build-completed handler (~`:441`), read
-`build_result.get("build", {})`, map to the `MIGET_*` dict (+ `HEROKU_*` when the app's heroku-compat
-flag is on — the flag is derived by extracting `MIGET_HEROKU_COMPAT` from the user env in 2d/3a;
-see Heroku compatibility aliases), and add `MIGET_APP_NAME` from the existing deploy context
-(`app_name`). For `MIGET_APP_ID`, read `custom_data.get('app_uuid')` (the app UUID — see
-"Dependency: app UUID plumbing"); **do not** use the existing `app_id` (`watcher.miget.com/object.id`,
-the DB record id). Omit any key whose source value is missing — including `MIGET_APP_ID` until the
-UUID is plumbed through.
+**2a. Read + map (three sources).** In `lib/k8s/builds/handlers.py` build-completed handler
+(~`:441`), compose the `MIGET_*` dict from the three sources above:
+- `build_result.get("build", {})` → `MIGET_GIT_*`, `MIGET_BUILD_AT`, `MIGET_BUILDER_VERSION`,
+  `MIGET_LANGUAGE`, `MIGET_GIT_REPOSITORY`.
+- the `<app>-meta` ConfigMap (2e) → `MIGET_APP_ID` (= `app.uuid`), `MIGET_APP_NAME`, and the
+  heroku-compat flag. **Do not** reuse the existing `app_id` (`watcher.miget.com/object.id`) — that
+  is the DB record id.
+- per-build deploy context (if present) → `MIGET_RELEASE_VERSION`, `MIGET_RELEASE_CREATED_AT`.
+
+Emit `HEROKU_*` aliases when the compat flag (from `<app>-meta`) is on. Omit any key whose source
+value is missing.
 
 **2b. Inject via dedicated ConfigMap (decision A).** Create/replace an `<app>-build` ConfigMap
 holding the `MIGET_*` values (non-secret, release-scoped, overwritten wholesale each build —
@@ -233,13 +258,27 @@ They must never appear in the UI env list — they are platform-managed, not use
 **2d. Reserved-namespace strip (with the one compat exception).** Before applying user env to the
 runtime (app.json `build_result["env"]` at `handlers.py:510`, the Compose service-env path, and
 any Rails-pushed env-update path), handle `MIGET_*` user keys:
-- `MIGET_HEROKU_COMPAT` → **extract** as the app/service heroku-compat flag (consumed by 2a),
-  then **drop** from the runtime passthrough (not injected into the container).
+- `MIGET_HEROKU_COMPAT` → **extract** as the heroku-compat flag for this deploy, then **drop**
+  from the runtime passthrough (not injected into the container).
 - every other `^MIGET_` key → **drop** and log.
 
-Prevents apps from spoofing/overriding build metadata while still letting the user toggle compat.
+The compat flag's source of truth is `<app>-meta` (2e), set at add_app from the Rails app setting.
+An inline `MIGET_HEROKU_COMPAT` (UI env / compose env) is the alternative input extracted here; the
+daemon treats compat as ON if **either** the `<app>-meta` flag or the extracted inline value is
+true. Prevents apps from spoofing/overriding build metadata while still letting the user toggle
+compat.
 
-### 3. miget-kube-api (namespace guard + UUID threading — checkout a branch if changes needed)
+**2e. `<app>-meta` ConfigMap (static app identity).** At `add_app` (`main.py:580`, which already
+receives `app_config`/`deployment_config`), create/update a per-app `<app>-meta` ConfigMap holding
+`app_uuid`, `app_name`, and `heroku_compat`. This is written **once per app** (not per build), so
+it is available to every subsequent build-completed event regardless of deploy method
+(github / public-git push / container registry). 2a reads it. Keeping it separate from the
+release-scoped `<app>-build` ConfigMap (2b) cleanly splits *static identity* from *per-release
+provenance*. (Annotations on the app's Deployment, mirroring the existing
+`watcher.miget.com/object.id`, are an acceptable alternative carrier; a ConfigMap is preferred for
+holding several keys.)
+
+### 3. miget-kube-api (namespace guard — checkout a branch if changes needed)
 
 **3a.** Extend the existing reserved-prefix guard in `parse_push_options_header`
 (`builds_trigger.py:801`) to reject keys starting with `MIGET_`, mirroring the `BUILD_VAR_` rule —
@@ -248,27 +287,39 @@ than rejected, since it is the user-facing toggle. If any other path lets user-d
 the app-env channel, apply the same rule there. This is the outermost gate; 2d is
 defense-in-depth and performs the final extract-then-strip before runtime injection.
 
-**3b. App UUID threading (for `MIGET_APP_ID`).** Thread the app UUID from the build-trigger
-payload through `custom_data` (`custom_data['app_uuid']`) in `builds_trigger.py`, alongside the
-existing `app_id`. See "Dependency: app UUID plumbing". Depends on Rails passing the UUID; if it
-is not yet available, this sub-task and `MIGET_APP_ID` ship in a follow-up.
+App identity (UUID/name/compat) is **not** threaded through the per-build trigger here — it flows
+through `add_app` instead (see section 4 + daemon 2e), so it is available for all deploy methods.
 
-## Dependency: app UUID plumbing (for `MIGET_APP_ID`)
+### 4. migetapp / Rails (producer of identity + git provenance — branch `feature/introduce-compose-stacks`)
 
-`MIGET_APP_ID` requires a stable app **UUID** that does not exist in the kube-api/daemon layer
-today. Wiring it through is a prerequisite for emitting that one var (everything else ships
-without it):
+Rails already holds everything needed; no new data to compute, only plumbing:
 
-1. **Rails (app.miget.com)** — owns the app's UUID. Add it to the build-trigger payload (e.g.
-   `config['app_uuid']`).
-2. **miget-kube-api** — thread it through `custom_data` (e.g. `custom_data['app_uuid']`) in
-   `builds_trigger.py` (alongside the existing `app_id`), and optionally as a distinct annotation
-   (`watcher.miget.com/object.uuid`) so it is not confused with `object.id`.
-3. **migets-k8s-daemon** — read `custom_data.get('app_uuid')` in `handlers.py` and map it to
-   `MIGET_APP_ID`. If absent, omit the var.
+**4a. App identity at `add_app`.** Include `app_uuid` (= `app.uuid`, which already exists:
+`apps.uuid`, `gen_random_uuid()`, unique), `app_name`, and the `heroku_compat` app setting in the
+`add_app` payload (`app_config`). The daemon persists these in `<app>-meta` (2e). This is the
+single source for `MIGET_APP_ID` / `MIGET_APP_NAME` / compat, and it covers github, public-git
+push, and container-registry deploys uniformly — solving "we don't know the app id at git push /
+container registry," since identity is registered once at app creation, not per build.
 
-This is the one field gated on a cross-repo prerequisite; the rest of the feature does not depend
-on it. If the UUID work slips, ship `MIGET_APP_ID` in a follow-up.
+**4b. Git provenance as build input (model C platform side).** Rails already snapshots commit data
+in `deployment_config` — `last_deployed_commit_sha` / `last_commit_message` / `last_commit_author`
+/ `last_commit_timestamp` / `repository` (`app/services/apps/deploy.rb:48-114`) and the branch.
+For `github`/`public_git` deploys, pass these to the build as the platform-authoritative `MIGET_*`
+git inputs (model C: they win over `.git` autodetection in migetpacks). `git_push` (Gitea)
+provenance comes from the push/clone; `container_registry` has no commit (git fields omitted).
+
+**4c. Heroku-compat toggle (UI).** Surface the per-app `heroku_compat` setting in app settings. It
+is **not** a user-typed `MIGET_*` env var (those are reserved/stripped) — it is a first-class app
+setting that flows via 4a into `<app>-meta`. (The inline `MIGET_HEROKU_COMPAT` env/compose path of
+2d/3a is a secondary convenience, not the primary UI.)
+
+**4d. Release info (optional).** If `MIGET_RELEASE_VERSION` / `MIGET_RELEASE_CREATED_AT` are wanted,
+Rails supplies the release counter (`Deployment` count, `app/models/deployment.rb:68`) per build as
+deploy context. Optional — omit to ship without release parity initially.
+
+**4e. Reserved namespace in the UI.** The env-var editor must reject/hide user-entered `MIGET_*`
+keys (except the compat toggle, which is its own setting), matching the kube-api (3a) and daemon
+(2d) guards. Build-metadata vars are never shown as editable config.
 
 ## Edge cases & error handling
 
@@ -293,15 +344,25 @@ on it. If the UUID work slips, ship `MIGET_APP_ID` in a follow-up.
   missing-`.git` omission, detached HEAD. Assert `result.json` contains a well-formed `build`
   block. Assert `/.miget/build.json` exists and parses in a buildpack image; assert labels via
   `docker inspect` for all three build types.
-- **daemon** (`tests/`): given a `build_result` with a `build` block, assert the `<app>-build`
-  ConfigMap is created with the mapped `MIGET_*` keys, the second `envFrom` is baked into pod
-  templates, `HEROKU_*` appears only when compat is on, `send_var_detected` is **not** called for
-  `MIGET_*`, user `MIGET_*` keys are stripped, and `MIGET_HEROKU_COMPAT` is extracted as the compat
-  flag (enabling `HEROKU_*`) yet not injected into the container.
+- **daemon** (`tests/`): `add_app` writes `<app>-meta` with `app_uuid`/`app_name`/`heroku_compat`.
+  Given a `build_result` with a `build` block + an `<app>-meta` ConfigMap, assert the `<app>-build`
+  ConfigMap is composed from all three sources with the mapped `MIGET_*` keys (incl. `MIGET_APP_ID`
+  = the uuid, **not** `object.id`), the second `envFrom` is baked into pod templates, `HEROKU_*`
+  appears only when compat is on, `send_var_detected` is **not** called for `MIGET_*`, user
+  `MIGET_*` keys are stripped, and `MIGET_HEROKU_COMPAT` is extracted (enabling `HEROKU_*`) yet not
+  injected into the container.
 - **kube-api** (`tests/`): `parse_push_options_header` rejects `MIGET_*` keys **except**
   `MIGET_HEROKU_COMPAT`, which is allowed through / extracted.
+- **migetapp** (`spec/`): `add_app` payload includes `app_uuid`/`app_name`/`heroku_compat`; git
+  provenance is passed as `MIGET_*` build inputs for github/public_git deploys; the env-var editor
+  rejects user-entered `MIGET_*` keys.
 
 ## Open questions
 
-None blocking. `repository` URL format (`github.com/org/repo` vs full clone URL) to be finalized
-against whatever the platform already passes the daemon; default to whatever `BUILD_VARS` carries.
+None blocking.
+- `repository` URL format (`github.com/org/repo` vs full clone URL) — finalize against what Rails
+  stores in `deployment_config.repository`; normalize to host/org/repo for labels.
+- Exact channel Rails uses to pass git provenance to the build as `MIGET_*` inputs (push-options vs
+  a dedicated build-config field) — resolve in the migetapp/kube-api implementation plan; the
+  reserved-namespace guards (2d/3a) must allow the platform-internal channel while rejecting
+  user-typed `MIGET_*`.
