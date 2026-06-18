@@ -52,6 +52,9 @@ spec:
           value: $(params.dockerfile-path)
         - name: COMPOSE_FILE
           value: $(params.compose-file)
+        # Build metadata provenance envelope (commit, branch, repository, etc.)
+        - name: BUILD_META
+          value: $(params.build-meta)
         # Results for post-build steps
         - name: RESULT_FILE
           value: $(params.result-file)
@@ -147,6 +150,10 @@ spec:
     - name: cache-registry-insecure
       description: "Set to 'true' for HTTP registries"
       default: "false"
+    # Build metadata provenance envelope (JSON: commit, branch, description, committed_at, repository)
+    - name: build-meta
+      description: "Build metadata provenance JSON read by the builder as $BUILD_META (default: empty)"
+      default: ""
     # Results
     - name: result-file
       description: "Path to write build results JSON for post-build steps (default: empty, no results written)"
