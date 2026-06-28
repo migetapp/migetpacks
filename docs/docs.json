@@ -48,6 +48,7 @@
             "group": "Configuration",
             "pages": [
               "configuration/environment-variables",
+              "configuration/build-metadata",
               "configuration/version-detection",
               "configuration/app-json"
             ]

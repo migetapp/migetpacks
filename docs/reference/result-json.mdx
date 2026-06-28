@@ -28,6 +28,7 @@ The builder always exits with code 0 to ensure post-build steps (like Shipwright
 | `language` | string | Detected or specified language |
 | `timestamp` | string | ISO 8601 build completion time |
 | `_shell` | boolean | `false` for distroless/DHI containers (no shell available) |
+| `build` | object | Git provenance and builder facts (commit, branch, description, repository, build time, builder version) |
 
 ### images
 
@@ -150,6 +151,30 @@ When `_shell` is `false` (DHI/distroless images), deployment systems should:
 - Use exec format for commands (no `/bin/sh -c` wrapper)
 - Pre-expand shell variables like `${PORT:-5000}`
 - Avoid relying on shebangs in scripts
+
+### build
+
+Git provenance and builder facts, present on every build:
+
+```json
+{
+  "build": {
+    "commit": "9f3c1a7b8e2d4f5a6c7b8e2d4f5a6c7b8e2d4f5a",
+    "commit_short": "9f3c1a7",
+    "branch": "main",
+    "description": "Fix build-vars call order",
+    "committed_at": "2026-06-17T19:40:00Z",
+    "built_at": "2026-06-17T20:00:00Z",
+    "builder_version": "0.0.264",
+    "language": "ruby",
+    "repository": "https://github.com/acme/my-api"
+  }
+}
+```
+
+Unknown fields are omitted. Values resolve by precedence: the `build-meta`
+input envelope, then `MIGET_GIT_*` / `SOURCE_VERSION` environment variables,
+then `.git` autodetection of the source directory.
 
 ## Success Example
 

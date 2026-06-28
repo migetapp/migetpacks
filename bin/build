@@ -27,6 +27,7 @@ PROJECT_PATH=${PROJECT_PATH:-""}  # Subdirectory within SOURCE_DIR for monorepo 
 DOCKERFILE_PATH=${DOCKERFILE_PATH:-""}  # Custom Dockerfile path (relative to PROJECT_PATH or absolute)
 COMPOSE_FILE=${COMPOSE_FILE:-""}  # Custom compose file path (relative to PROJECT_PATH or absolute)
 RESULT_FILE=${RESULT_FILE:-""}  # Path to write build results JSON (for Shipwright post-build steps)
+BUILD_META_JSON=""  # compact JSON build-metadata blob (memoized by ensure_build_meta_json)
 CUSTOM_DATA=${CUSTOM_DATA:-""}  # Custom JSON data to include in result file
 USE_DHI=${USE_DHI:-"false"}  # Use Docker Hardened Images (dhi.io) when true, official images when false
 DEBUG=${DEBUG:-""}  # Set to "1" for verbose buildx output
@@ -389,6 +390,17 @@ source "$BUILDPACK_DIR/lib/buildpacks.sh"
 # is_valid_build_arg_name + warning from lib/common.sh.
 build_arg_flags_from_build_vars
 
+# Compute BUILD_META_JSON once. Safe to call from every build path; later calls
+# are no-ops. built_at is stamped at first call (just before buildx), which is
+# within seconds of completion.
+ensure_build_meta_json() {
+  local language="${1:-unknown}"
+  if [ -z "$BUILD_META_JSON" ]; then
+    BUILD_META_JSON=$(gather_build_meta "$EFFECTIVE_SOURCE_DIR" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${MIGETPACKS_VERSION:-}" "$language")
+  fi
+}
+
 # Handle build failure - write result and exit
 # If RESULT_FILE is set, exit 0 for Shipwright post-build callbacks
 # Otherwise exit with actual error code for CI/CD pipelines
@@ -733,6 +745,12 @@ write_result_file() {
     result_json=$(echo "$result_json" | jq --argjson custom "$CUSTOM_DATA" '. + {custom: $custom}')
   fi
 
+  # Add build metadata (git provenance + builder facts)
+  ensure_build_meta_json "$language"
+  if [ -n "$BUILD_META_JSON" ] && [ "$BUILD_META_JSON" != "{}" ]; then
+    result_json=$(echo "$result_json" | jq --argjson b "$BUILD_META_JSON" '. + {build: $b}')
+  fi
+
   echo "$result_json" > "$RESULT_FILE"
 }
 
@@ -988,8 +1006,11 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
 
   # Run build and show output directly (no buffering)
   BUILD_OUTPUT=$(mktemp)
+  ensure_build_meta_json "dockerfile"
+  build_meta_label_flags "$BUILD_META_JSON"
+  build_meta_arg_flags "$BUILD_META_JSON"
   build_latest_tag_flag "$OUTPUT_IMAGE"
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" "${BUILD_META_ARG_FLAGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -1105,8 +1126,11 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
 
     # Build the service (resolve context relative to source directory)
     FULL_BUILD_CONTEXT="$EFFECTIVE_SOURCE_DIR/$BUILD_CONTEXT"
+    ensure_build_meta_json "compose"
+    build_meta_label_flags "$BUILD_META_JSON"
+    build_meta_arg_flags "$BUILD_META_JSON"
     build_latest_tag_flag "$SERVICE_IMAGE"
-    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" \
+    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" "${BUILD_META_ARG_FLAGS[@]}" \
         -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
         -t "$SERVICE_IMAGE" $LATEST_TAG_FLAG --push \
         "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
@@ -2354,8 +2378,11 @@ if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
   info "Build args: $(echo "$BUILD_VARS" | jq -r 'keys | map(sub("^BUILD_VAR_"; "")) | join(", ")')"
 fi
 
+ensure_build_meta_json "$LANG_NORMALIZED"
+build_meta_label_flags "$BUILD_META_JSON"
+stage_build_json "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_META_JSON"
 build_latest_tag_flag "$OUTPUT_IMAGE"
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then

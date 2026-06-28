@@ -75,6 +75,8 @@ docker run --rm \
 
 ## Custom Environment Variables
 
+For build provenance variables (`MIGET_GIT_COMMIT`, etc.) see [Build Metadata](/configuration/build-metadata).
+
 Any environment variable passed to migetpacks that is **not** in the known builder variables list is automatically injected into the generated Dockerfile as an `ENV` statement. This allows you to configure your application's build environment without modifying any configuration files.
 
 ### How It Works

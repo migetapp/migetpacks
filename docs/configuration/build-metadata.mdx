@@ -1,0 +1,59 @@
+---
+title: "Build Metadata"
+description: "Git provenance and builder facts emitted on every build"
+---
+
+## Overview
+
+migetpacks records who built an image and from which commit, then exposes that
+on four surfaces:
+
+- The `build` block in the [result JSON](/reference/result-json).
+- OCI image labels you can read with `docker inspect` without running the image.
+- An in-image file `/.miget/build.json` (buildpack builds).
+- `MIGET_*` build args for custom Dockerfile and Compose builds.
+
+## Sources
+
+Each field resolves by precedence, highest first:
+
+1. The `build-meta` input envelope (set by the platform).
+2. `MIGET_GIT_*` or `SOURCE_VERSION` environment variables, for standalone
+   `docker run` or CI builds.
+3. `.git` autodetection of the source directory.
+
+Unknown fields are omitted rather than set to empty strings.
+
+## OCI labels
+
+| Label | Value |
+|-------|-------|
+| `org.opencontainers.image.revision` | Full commit SHA |
+| `org.opencontainers.image.source` | Repository URL |
+| `org.opencontainers.image.created` | Build time (ISO 8601) |
+| `com.miget.git.branch` | Branch |
+| `com.miget.git.description` | Commit subject |
+| `com.miget.builder.version` | migetpacks version |
+
+```bash
+docker inspect my-app:latest --format '{{json .Config.Labels}}'
+```
+
+## In-image file
+
+Buildpack builds include `/.miget/build.json`, useful when you prefer a file
+over environment variables or run a distroless image with no shell:
+
+```bash
+docker run --rm my-app:latest cat /.miget/build.json
+```
+
+## Custom Dockerfile and Compose builds
+
+migetpacks does not modify a Dockerfile it does not own, so it passes the values
+as build args. Opt in from your Dockerfile:
+
+```dockerfile
+ARG MIGET_GIT_COMMIT
+ENV MIGET_GIT_COMMIT=${MIGET_GIT_COMMIT}
+```
