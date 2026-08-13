@@ -2,7 +2,10 @@
   "name": "migetpacks-docs",
   "private": true,
   "scripts": {
-    "dev": "mint dev",
-    "start": "mint dev --port ${PORT:-5000}"
+    "dev": "mintlify dev",
+    "start": "mintlify dev --port ${PORT:-5000}"
+  },
+  "dependencies": {
+    "mintlify": "4.2.255"
   }
 }
