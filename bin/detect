@@ -197,6 +197,14 @@ detect_deno() {
 
 # Detect Kotlin applications
 detect_kotlin() {
+  if [ -f "$BUILD_DIR/pom.xml" ] \
+     && [ ! -f "$BUILD_DIR/gradlew" ] \
+     && [ ! -f "$BUILD_DIR/build.gradle" ] \
+     && [ ! -f "$BUILD_DIR/build.gradle.kts" ] \
+     && [ ! -f "$BUILD_DIR/settings.gradle" ] \
+     && [ ! -f "$BUILD_DIR/settings.gradle.kts" ]; then
+    return 1
+  fi
   # Check for Kotlin-specific files (settings.gradle.kts or any .kt files in project)
   if [ -f "$BUILD_DIR/settings.gradle.kts" ]; then
     return 0

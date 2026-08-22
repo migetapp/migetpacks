@@ -165,6 +165,11 @@ setup_fixtures() {
   echo 'plugins { kotlin("jvm") version "2.1.0" }' > "$TEST_DIR/kotlin-app/build.gradle.kts"
   echo "2.1.0" > "$TEST_DIR/kotlin-app/.kotlin-version"
 
+  # Kotlin sources built by Maven (kotlin-maven-plugin), no Gradle files
+  mkdir -p "$TEST_DIR/kotlin-maven-app/src/main/kotlin"
+  echo '<project><artifactId>kotlin-maven-app</artifactId></project>' > "$TEST_DIR/kotlin-maven-app/pom.xml"
+  echo 'fun main() {}' > "$TEST_DIR/kotlin-maven-app/src/main/kotlin/App.kt"
+
   # Dockerfile fixture (no other language files - pure Dockerfile project)
   mkdir -p "$TEST_DIR/dockerfile-app"
   echo "FROM alpine:3.21" > "$TEST_DIR/dockerfile-app/Dockerfile"
@@ -215,6 +220,7 @@ run_tests() {
   test_detect "Rust detection" "$TEST_DIR/rust-app" 0 "Rust"
   test_detect "Scala detection" "$TEST_DIR/scala-app" 0 "Scala"
   test_detect "Kotlin detection" "$TEST_DIR/kotlin-app" 0 "Kotlin"
+  test_detect "Kotlin sources with Maven build" "$TEST_DIR/kotlin-maven-app" 0 "Java (Maven)"
   test_detect "Elixir detection" "$TEST_DIR/elixir-app" 0 "Elixir"
   test_detect "Dockerfile detection" "$TEST_DIR/dockerfile-app" 0 "Dockerfile"
   # Compose auto-detection disabled - use LANGUAGE=compose or COMPOSE_FILE env var
