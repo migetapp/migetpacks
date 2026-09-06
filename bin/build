@@ -37,6 +37,11 @@ CACHE_MODE=${CACHE_MODE:-"min"}  # BuildKit cache mode: "min" (default, smaller)
 CACHE_FROM=${CACHE_FROM:-""}  # Additional read-only cache sources (comma-separated registry refs)
 BUILDPACKS=${BUILDPACKS:-""}  # Explicit buildpack order (e.g., "ruby,python,nodejs" - first is primary)
 TAG_LATEST=${TAG_LATEST:-"false"}  # Also tag with :latest when true
+BUILD_ATTESTATIONS=${BUILD_ATTESTATIONS:-"false"}
+ATTESTATION_FLAGS=""
+if [ "$BUILD_ATTESTATIONS" != "true" ]; then
+  ATTESTATION_FLAGS="--provenance=false --sbom=false"
+fi
 
 # Filter for buildx output - suppress non-actionable warnings, mask build var values, indent output
 filter_buildx_output() {
@@ -126,6 +131,7 @@ KNOWN_BUILDER_VARS=(
   "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_SESSION_TOKEN" "AWS_REGION" "AWS_DEFAULT_REGION"
   # Docker/system vars
   "DOCKER_HOST" "DOCKER_PLATFORM" "DOCKER_BUILDKIT" "DOCKER_CONFIG" "STORAGE_DRIVER"
+  "BUILD_ATTESTATIONS" "ATTESTATION_FLAGS"
   # Internal vars
   "BUILD_EXIT_CODE" "BUILD_ERROR_MESSAGE" "DETECTED_LANGUAGE" "CACHE_FLAGS" "BUILD_VARS"
   # Shell/system vars (never pass through)
@@ -1012,7 +1018,7 @@ if [ "$LANG_NORMALIZED" = "dockerfile" ]; then
   build_meta_label_flags "$BUILD_META_JSON"
   build_meta_arg_flags "$BUILD_META_JSON"
   build_latest_tag_flag "$OUTPUT_IMAGE"
-  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" "${BUILD_META_ARG_FLAGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
+  if ! docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $ATTESTATION_FLAGS $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" "${BUILD_META_ARG_FLAGS[@]}" -f Dockerfile -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output; then
     build_error=$(tail -20 "$BUILD_OUTPUT")
     rm -f "$BUILD_OUTPUT"
     handle_build_failure 1 "Docker build failed: $build_error"
@@ -1132,7 +1138,7 @@ if [ "$LANG_NORMALIZED" = "compose" ]; then
     build_meta_label_flags "$BUILD_META_JSON"
     build_meta_arg_flags "$BUILD_META_JSON"
     build_latest_tag_flag "$SERVICE_IMAGE"
-    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" "${BUILD_META_ARG_FLAGS[@]}" \
+    if docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $ATTESTATION_FLAGS $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" "${BUILD_META_ARG_FLAGS[@]}" \
         -f "$FULL_BUILD_CONTEXT/$SERVICE_DOCKERFILE" \
         -t "$SERVICE_IMAGE" $LATEST_TAG_FLAG --push \
         "$FULL_BUILD_CONTEXT" 2>&1 | filter_buildx_output; then
@@ -2384,7 +2390,7 @@ ensure_build_meta_json "$LANG_NORMALIZED"
 build_meta_label_flags "$BUILD_META_JSON"
 stage_build_json "$RUNTIME_DOCKERFILE" "$EFFECTIVE_SOURCE_DIR" "$BUILD_META_JSON"
 build_latest_tag_flag "$OUTPUT_IMAGE"
-docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
+docker buildx build --progress=plain --network=host --platform "$DOCKER_PLATFORM" $ATTESTATION_FLAGS $CACHE_FLAGS "${SSH_FLAGS[@]}" "${BUILD_ARGS[@]}" "${BUILD_LABEL_FLAGS[@]}" -f "$RUNTIME_DOCKERFILE" -t "$OUTPUT_IMAGE" $LATEST_TAG_FLAG $BUILD_OUTPUT_FLAG "$EFFECTIVE_SOURCE_DIR" 2>&1 | tee "$BUILD_OUTPUT" | filter_buildx_output
 BUILD_EXIT=${PIPESTATUS[0]}
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
