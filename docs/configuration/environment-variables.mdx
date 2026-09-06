@@ -20,6 +20,7 @@ These environment variables control how migetpacks builds your application.
 | `COMPOSE_FILE` | No | - | Custom compose file path (auto-detects `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`) |
 | `BUILDPACKS` | No | auto-detected | Explicit buildpack order (e.g., `ruby,python,nodejs` - first is primary) |
 | `TAG_LATEST` | No | `false` | Also tag image with `:latest` in addition to primary tag |
+| `BUILD_ATTESTATIONS` | No | `false` | Attach BuildKit provenance and SBOM attestations to the pushed image. Off by default because attestation manifests are not deletable in some registries |
 | `RESULT_FILE` | No | - | Path to write build results JSON (for Shipwright post-build steps) |
 | `STORAGE_DRIVER` | No | `overlay2` | Docker storage driver override (e.g., `fuse-overlayfs` for nested DinD) |
 
