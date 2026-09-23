@@ -51,7 +51,7 @@ RUN cargo build --release \
     && rm -rf src target Cargo.toml Cargo.lock .git
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates
 WORKDIR /app
 COPY --from=builder /build /app

@@ -270,7 +270,8 @@ ENV HEX_HOME=/home/miget/.hex
 ENV MIX_HOME=/home/miget/.mix
 
 # Install git (needed for git dependency verification at runtime)
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN ${APT_EOL_FIX} \\
+    && apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 # Copy Hex/Mix from builder (needed by mix phx.server)
 RUN mkdir -p /home/miget/.hex /home/miget/.mix

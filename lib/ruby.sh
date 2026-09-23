@@ -126,14 +126,16 @@ ruby_generate_builder() {
     # DHI: install build tools, git, dev packages for native gems, and runtime packages for copying
     cat >> "$dockerfile" <<EOF
 # Install build tools, git, and dependencies for native gems (runtime libs copied to distroless)
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git ${RUBY_APT_DEV_PACKAGES} ${RUBY_APT_PACKAGES} \\
+RUN ${APT_EOL_FIX} \\
+    && apt-get update && apt-get install -y --no-install-recommends build-essential git ${RUBY_APT_DEV_PACKAGES} ${RUBY_APT_PACKAGES} \\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 EOF
   else
     # Standard image: install build tools, git, and dev packages for native gems
     cat >> "$dockerfile" <<EOF
 # Install build tools, git, and dependencies for native gems
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git ${RUBY_APT_DEV_PACKAGES} \\
+RUN ${APT_EOL_FIX} \\
+    && apt-get update && apt-get install -y --no-install-recommends build-essential git ${RUBY_APT_DEV_PACKAGES} \\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 EOF
   fi
@@ -382,7 +384,8 @@ RUN getent group 1000 >/dev/null 2>&1 || groupadd -g 1000 miget; \\
     mkdir -p /home/miget && chown 1000:1000 /home/miget
 
 # Install runtime dependencies BEFORE copying app (for layer caching)
-RUN apt-get update && apt-get install -y --no-install-recommends ${RUBY_APT_PACKAGES} \\
+RUN ${APT_EOL_FIX} \\
+    && apt-get update && apt-get install -y --no-install-recommends ${RUBY_APT_PACKAGES} \\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
