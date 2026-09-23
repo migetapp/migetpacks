@@ -8,6 +8,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+APT_EOL_FIX=". /etc/os-release 2>/dev/null; case \"\${VERSION_CODENAME:-}\" in bullseye) sed -i '/bullseye-security/d' /etc/apt/sources.list ;; buster|stretch) sed -i -e '/^deb /s|http://[a-z.]*debian.org|http://archive.debian.org|' -e '/-updates/d' /etc/apt/sources.list; echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99archive ;; esac"
+
 # Output functions
 header() {
   echo ""

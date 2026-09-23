@@ -1650,7 +1650,7 @@ else
       ;;
     rust)
       BUILD_IMAGE="rust:${VERSION}"
-      RUNTIME_IMAGE="debian:bookworm-slim"
+      RUNTIME_IMAGE="debian:trixie-slim"
       ;;
     php)
       # FrankenPHP: modern PHP app server (Go + Caddy based)

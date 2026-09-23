@@ -175,7 +175,8 @@ DOCKERFILE_FOOTER
     cat >> "$dockerfile" <<EOF
 
 # Install runtime dependencies BEFORE copying app (for layer caching)
-RUN apt-get update && apt-get install -y --no-install-recommends ${PYTHON_APT_PACKAGES} \\
+RUN ${APT_EOL_FIX} \\
+    && apt-get update && apt-get install -y --no-install-recommends ${PYTHON_APT_PACKAGES} \\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 EOF
   fi
