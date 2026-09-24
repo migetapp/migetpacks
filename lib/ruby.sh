@@ -254,7 +254,9 @@ EOF
 
   # Generate dummy DATABASE_URL based on detected DB adapter (matches Heroku behavior)
   local dummy_db_url="postgres://user:pass@127.0.0.1/dummy"
-  if [ "$RUBY_NEEDS_MYSQL" = true ]; then
+  if [ "$RUBY_NEEDS_LIBPQ" = true ]; then
+    dummy_db_url="postgres://user:pass@127.0.0.1/dummy"
+  elif [ "$RUBY_NEEDS_MYSQL" = true ]; then
     dummy_db_url="mysql2://user:pass@127.0.0.1/dummy"
   elif [ "$RUBY_NEEDS_SQLITE" = true ]; then
     dummy_db_url="sqlite3:///tmp/dummy.sqlite3"

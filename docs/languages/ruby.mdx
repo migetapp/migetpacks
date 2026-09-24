@@ -174,7 +174,7 @@ Shell-dependent features like `.profile.d` scripts and shell variable expansion 
 
 ## Multi-Buildpack
 
-Ruby applications commonly use Node.js for asset compilation. When `package.json` is detected alongside a Ruby project, Node.js is automatically added as a secondary buildpack:
+Ruby applications commonly use Node.js for asset compilation. When `package.json` is detected alongside a Ruby project, or `Gemfile.lock` includes `execjs` or `webpacker`, Node.js is automatically added as a secondary buildpack:
 
 ```bash
 # Explicit buildpack ordering
