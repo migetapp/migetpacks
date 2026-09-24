@@ -1219,7 +1219,8 @@ else
   # Exclude runtimes that handle npm packages natively: nodejs, node, bun, deno
   if [ "$LANG_NORMALIZED" != "nodejs" ] && [ "$LANG_NORMALIZED" != "node" ] && \
      [ "$LANG_NORMALIZED" != "bun" ] && [ "$LANG_NORMALIZED" != "deno" ]; then
-    if [ -f "$EFFECTIVE_SOURCE_DIR/package.json" ]; then
+    if [ -f "$EFFECTIVE_SOURCE_DIR/package.json" ] || \
+       { [ "$LANG_NORMALIZED" = "ruby" ] && grep -qE '^    (execjs|webpacker) \(' "$EFFECTIVE_SOURCE_DIR/Gemfile.lock" 2>/dev/null; }; then
       SECONDARY_LANG="nodejs"
       SECONDARY_VERSION=$(LANGUAGE=nodejs "$BUILDPACK_DIR/bin/detect-version" "$EFFECTIVE_SOURCE_DIR")
       SECONDARY_IMAGE="node:${SECONDARY_VERSION}"
