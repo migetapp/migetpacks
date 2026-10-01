@@ -521,6 +521,7 @@ parse_procfile() {
 
 # JSON objects to store app.json data
 APP_JSON_ENV="{}"
+APP_JSON_ENV_GENERATORS="{}"
 APP_JSON_FORMATION="{}"
 APP_JSON_SCRIPTS="{}"
 APP_JSON_BUILDPACKS="[]"
@@ -731,6 +732,13 @@ write_result_file() {
   # Add app.json env variables if available (simple key-value object)
   if [ "$APP_JSON_ENV" != "{}" ]; then
     result_json=$(echo "$result_json" | jq --argjson env "$APP_JSON_ENV" '. + {env: $env}')
+  fi
+
+  # Keys whose value this build generated (generator: "secret"): the deployer
+  # sets them only when missing, or every build would rotate them.
+  if [ "$APP_JSON_ENV_GENERATORS" != "{}" ]; then
+    result_json=$(echo "$result_json" | jq --argjson gen "$APP_JSON_ENV_GENERATORS" \
+      '. + {env_generated: ($gen | to_entries | map(select(.value == "secret") | .key))}')
   fi
 
   # Add app.json formation (replicas) if available
@@ -1289,26 +1297,28 @@ fi
 WEB_PROCESS=""
 PROCESS_SOURCE=""
 
-if [ -n "$RUN_COMMAND" ]; then
+# The Procfile is the app's declaration and always parsed: its web process wins
+# over RUN_COMMAND, which only fills in when the Procfile has none, and its
+# workers and release process are kept either way.
+PROCFILE_WEB=""
+if [ -f "$EFFECTIVE_SOURCE_DIR/Procfile" ]; then
+  PROCFILE_PROCESSES_JSON=$(parse_procfile "$EFFECTIVE_SOURCE_DIR/Procfile")
+  PROCFILE_WEB=$(grep -E "^web:" "$EFFECTIVE_SOURCE_DIR/Procfile" 2>/dev/null | sed 's/^web:[[:space:]]*//' | head -1 || true)
+fi
+
+if [ -n "$PROCFILE_WEB" ]; then
+  WEB_PROCESS="$PROCFILE_WEB"
+  PROCESS_SOURCE="(from Procfile)"
+elif [ -n "$RUN_COMMAND" ]; then
   WEB_PROCESS="$RUN_COMMAND"
   PROCESS_SOURCE="(from RUN_COMMAND)"
 elif [ -f "$EFFECTIVE_SOURCE_DIR/Procfile" ]; then
-  # Parse all processes from Procfile
-  PROCFILE_PROCESSES_JSON=$(parse_procfile "$EFFECTIVE_SOURCE_DIR/Procfile")
-
-  # Get web process
-  PROCFILE_WEB=$(grep -E "^web:" "$EFFECTIVE_SOURCE_DIR/Procfile" 2>/dev/null | sed 's/^web:[[:space:]]*//' | head -1 || true)
-  if [ -n "$PROCFILE_WEB" ]; then
-    WEB_PROCESS="$PROCFILE_WEB"
-    PROCESS_SOURCE="(from Procfile)"
-  else
-    # No web process, use first process
-    PROCFILE_FIRST=$(grep -E "^[a-zA-Z_][a-zA-Z0-9_]*:" "$EFFECTIVE_SOURCE_DIR/Procfile" 2>/dev/null | head -1 || true)
-    if [ -n "$PROCFILE_FIRST" ]; then
-      PROCESS_NAME=$(echo "$PROCFILE_FIRST" | cut -d: -f1)
-      WEB_PROCESS=$(echo "$PROCFILE_FIRST" | sed 's/^[^:]*:[[:space:]]*//')
-      PROCESS_SOURCE="(from Procfile: $PROCESS_NAME)"
-    fi
+  # No web process, use first process
+  PROCFILE_FIRST=$(grep -E "^[a-zA-Z_][a-zA-Z0-9_]*:" "$EFFECTIVE_SOURCE_DIR/Procfile" 2>/dev/null | head -1 || true)
+  if [ -n "$PROCFILE_FIRST" ]; then
+    PROCESS_NAME=$(echo "$PROCFILE_FIRST" | cut -d: -f1)
+    WEB_PROCESS=$(echo "$PROCFILE_FIRST" | sed 's/^[^:]*:[[:space:]]*//')
+    PROCESS_SOURCE="(from Procfile: $PROCESS_NAME)"
   fi
 fi
 
